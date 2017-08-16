@@ -19,11 +19,9 @@
 
 using namespace std;
 
-const int MAX_POLL_EVENTS = 2;
+const int MAX_POLL_EVENTS = 128;
 
-// hey
-
-#define SUBMISSION_MODE
+//#undef SUBMISSION_MODE
 
 #define verify(cond) if (!(cond)) { fprintf(stderr, "Verification failed: '" #cond "' on line %d\n", __LINE__); perror("perror"); fflush(stderr); abort(); }
 
@@ -34,7 +32,6 @@ const int MAX_POLL_EVENTS = 2;
 #endif
 
 /* Profiling */
-
 
 using li = long long;
 
@@ -203,60 +200,87 @@ static int make_socket_non_blocking(int sfd) {
     return 0;
 }
 
-static int create_and_bind(int& port) {
-    for (int retries = 0; retries < 3; retries++) {
-        struct addrinfo hints;
-        struct addrinfo *result, *rp;
-        int s, sfd;
+#include <arpa/inet.h>
 
-        memset(&hints, 0, sizeof(struct addrinfo));
-        hints.ai_family = AF_UNSPEC;
-        hints.ai_socktype = SOCK_STREAM;
-        hints.ai_flags = AI_PASSIVE;
+static int create_and_bind(int port) {
+    int sfd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, IPPROTO_IP);
+    verify(sfd != -1);
+    
+    int reuse = 1;
+    if (setsockopt(sfd, SOL_SOCKET, SO_BROADCAST, (const char*)&reuse, sizeof(reuse)) < 0)
+        perror("setsockopt(SO_BROADCAST) failed");
+    
+    if (setsockopt(sfd, SOL_SOCKET, SO_REUSEADDR, (const char*)&reuse, sizeof(reuse)) < 0)
+        perror("setsockopt(SO_REUSEADDR) failed");
+    
 
-        s = getaddrinfo(NULL, to_string(port).c_str(), &hints, &result);
-        if (s != 0) {
-            fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(s));
-            abort();
-        }
-
-        for (rp = result; rp != NULL; rp = rp->ai_next) {
-            sfd = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
-            if (sfd == -1)
-                continue;
-            
-            int reuse = 1;
-            if (setsockopt(sfd, SOL_SOCKET, SO_REUSEADDR, (const char*)&reuse, sizeof(reuse)) < 0)
-                perror("setsockopt(SO_REUSEADDR) failed");
-
-            #ifdef SO_REUSEPORT
-            if (setsockopt(sfd, SOL_SOCKET, SO_REUSEPORT, (const char*)&reuse, sizeof(reuse)) < 0) 
-                perror("setsockopt(SO_REUSEPORT) failed");
-            #else
-            printf("SO_REUSEPORT is not supported\n");
-            #endif
-
-            s = bind(sfd, rp->ai_addr, rp->ai_addrlen);
-            if (s == 0) {
-                break;
-            }
-
-            close(sfd);
-        }
+#if 0
+    #ifdef SO_REUSEPORT
+    if (setsockopt(sfd, SOL_SOCKET, SO_REUSEPORT, (const char*)&reuse, sizeof(reuse)) < 0) 
+        perror("setsockopt(SO_REUSEPORT) failed");
+    #else
+    printf("SO_REUSEPORT is not supported\n");
+    #endif
+#endif
+    
+    sockaddr_in addr = {};
+    bzero((char *) &addr, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = inet_addr("0.0.0.0");
+    addr.sin_port = htons(port);
+           
+    verify(bind(sfd, (sockaddr*)&addr, sizeof(addr)) == 0);
+    
+    return sfd;
         
-        freeaddrinfo(result);
+    /*struct addrinfo hints;
+    struct addrinfo *result, *rp;
+    int s, sfd;
 
-        if (rp == NULL) {
-            fprintf(stderr, "Could not bind to port %d\n", port);
-            port++;
+    memset(&hints, 0, sizeof(struct addrinfo));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_flags = AI_PASSIVE;
+
+    s = getaddrinfo(NULL, to_string(port).c_str(), &hints, &result);
+    if (s != 0) {
+        fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(s));
+        abort();
+    }
+
+    for (rp = result; rp != NULL; rp = rp->ai_next) {
+        sfd = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
+        if (sfd == -1)
+            continue;
+        
+        int reuse = 1;
+        if (setsockopt(sfd, SOL_SOCKET, SO_REUSEADDR, (const char*)&reuse, sizeof(reuse)) < 0)
+            perror("setsockopt(SO_REUSEADDR) failed");
+
+        #ifdef SO_REUSEPORT
+        if (setsockopt(sfd, SOL_SOCKET, SO_REUSEPORT, (const char*)&reuse, sizeof(reuse)) < 0) 
+            perror("setsockopt(SO_REUSEPORT) failed");
+        #else
+        printf("SO_REUSEPORT is not supported\n");
+        #endif
+
+        s = bind(sfd, rp->ai_addr, rp->ai_addrlen);
+        if (s == 0) {
+            break;
         }
-        else {
-            return sfd;
-        }
+
+        close(sfd);
     }
     
-    printf("Could not acquire free port!\n");
-    abort();
+    freeaddrinfo(result);
+
+    if (rp == NULL) {
+        fprintf(stderr, "Could not bind to port %d\n", port); fflush(stderr);
+        abort();
+    }
+    else {
+        return sfd;
+    }*/
 }
 
 #include "picohttpparser/picohttpparser.h"
@@ -302,7 +326,7 @@ void write_only_header_answer(int fd, int code) {
 int process_get_request(int fd, const char* path, int path_length);
 int process_post_request(int fd, const char* path, int path_length, const char* body);
 
-struct input_request {
+struct travels_input_request_handler {
     string request_content;
     
     int parse(int fd) {
@@ -395,50 +419,80 @@ struct input_request {
     }
 };
 
+int current_timestamp;
+int is_rated_run;
+
 void load_json_dump_from_file(string file_name);
 void reindex_database();
 
 void initialize_validator();
 
-int main(int argc, char *argv[]) {
-    IntervalProfiler server_startup_prof;
-    server_startup_prof.begin_interval();
+void load_options_from_file(string file_name) {
+    ifstream is(file_name);
+    verify(is);
+    verify(is >> current_timestamp >> is_rated_run);
+    printf("Options loaded from '%s': timestamp %d, is rated %d\n", file_name.c_str(), current_timestamp, is_rated_run);
+}
+
+bool string_ends_with(string a, string b) {
+    return a.length() >= b.length() && a.substr(a.length() - b.length()) == b;
+}
+
+void load_initial_data() {
+    current_timestamp = time(0);
     
+    IntervalProfiler initial_data_prof;
+    initial_data_prof.begin_interval();
+    
+#if 0
+    initialize_validator();
+    
+    load_json_dump_from_file("../data/data/locations_1.json");
+    load_json_dump_from_file("../data/data/users_1.json");
+    load_json_dump_from_file("../data/data/visits_1.json");
+#else
+    printf("Running in submission mode, proceeding to unzip\n"); fflush(stdout);
+    {
+        string unzip_cmd = "unzip -o -j /tmp/data/data.zip '*' -d data >/dev/null";
+        int ec = system(unzip_cmd.c_str());
+        verify(ec == 0);
+        
+        string find_cmd = "find data -name '*' >db_files.txt";
+        ec = system(find_cmd.c_str());
+        verify(ec == 0);
+        
+        ifstream db_files("db_files.txt");
+        verify(db_files);
+        string db_file_name = "";
+        int n_files = 0;
+        
+        string concat;
+        while (getline(db_files, db_file_name) && db_file_name.length() > 0) {
+            if (!concat.empty()) concat += " ";
+            concat += db_file_name;
+            
+            n_files++;
+            if (string_ends_with(db_file_name, ".json")) {
+                load_json_dump_from_file(db_file_name.c_str());
+            }
+            else if (string_ends_with(db_file_name, ".txt")) {
+                load_options_from_file(db_file_name);
+            }
+        }
+        printf("files %s\n", concat.c_str()); fflush(stdout);
+        
+        verify(n_files > 0);
+    }
+#endif
+    
+    reindex_database();
+    initial_data_prof.end_interval();
+    printf("Initial data loaded in %.3f seconds\n", initial_data_prof.average_ns() / (double)1e9); fflush(stdout);
+}
+
+void inspect_server_parameters() {
     verify(sizeof(int) == 4);
     verify(sizeof(time_t) == 8);
-    //verify(0);
-    
-    epoll_event event;
-    epoll_event* events = nullptr;
-
-    int port;
-    if (argc != 2 || !sscanf(argv[1], "%d", &port)) {
-        fprintf(stderr, "Usage: %s [port]\n", argv[0]);
-        exit(EXIT_FAILURE);
-    }
-    int wanted_port = port;
-
-    int sfd = create_and_bind(port);
-    verify(sfd != -1);
-
-    verify(make_socket_non_blocking(sfd) != -1);
-    verify(listen(sfd, SOMAXCONN) != -1);
-
-    int efd = epoll_create1(0);
-    verify(efd != -1);
-
-    event.data.fd = sfd;
-    event.events = EPOLLIN | EPOLLET;
-    verify(epoll_ctl(efd, EPOLL_CTL_ADD, sfd, &event) != -1);
-
-    /* Buffer where events are returned */
-    events = (epoll_event*)calloc(MAX_POLL_EVENTS, sizeof event);
-    
-    printf("Started server loop, port %d\n", port); fflush(stdout);
-    //fprintf(stderr, "hello stderr\n"); fflush(stderr);
-    if (port != wanted_port) {
-        printf("WARNING: server started on port %d different from %d asked\n", port, wanted_port);
-    }
     
     {
         IntervalProfiler ts_profiler;
@@ -456,47 +510,212 @@ int main(int argc, char *argv[]) {
         
         printf("clock_gettime cost (ns): %.5f, hash %lld\n", ts_profiler.average_ns() / (double)N_TEST_GETTIMES, hash); fflush(stdout);
     }
+}
+
+struct instant_answer_request_handler {
+    string request_content;
     
-#ifndef SUBMISSION_MODE
-    initialize_validator();
+    int parse(int fd) {
+        write_only_header_answer(fd, 200);
+        return 1;
+    }
+};
+
+using input_request_handler = travels_input_request_handler;
+//using input_request_handler = instant_answer_request_handler;
+
+#if 0
+void start_bullshit_server() {
+    int sfd = create_and_bind(80);
+    verify(sfd != -1);
     
-    load_json_dump_from_file("../data/data/locations_1.json");
-    load_json_dump_from_file("../data/data/users_1.json");
-    load_json_dump_from_file("../data/data/visits_1.json");
-#else
-    printf("Running in submission mode, proceeding to unzip\n"); fflush(stdout);
-    {
-        string unzip_cmd = "unzip -o -j /tmp/data/data.zip '*.json' -d data";
-        int ec = system(unzip_cmd.c_str());
-        verify(ec == 0);
+    verify(make_socket_non_blocking(sfd) != -1);
+    verify(listen(sfd, SOMAXCONN) != -1);
+    
+    while (true) {
+        //printf("bullshit ready :)\n");
         
-        string find_cmd = "find data -name '*.json' >db_files.txt";
-        ec = system(find_cmd.c_str());
-        verify(ec == 0);
+        struct sockaddr in_addr;
+        socklen_t in_len;
+        in_len = sizeof in_addr;
+        int socket = accept(sfd, &in_addr, &in_len);
+        verify(socket != -1);
         
-        ifstream db_files("db_files.txt");
-        string db_file_name = "";
-        int n_files = 0;
-        while (getline(db_files, db_file_name) && db_file_name.length() > 0) {
-            n_files++;
-            load_json_dump_from_file(db_file_name.c_str());
+        //printf("accepted :)\n");
+        
+        const int READ_BUFFER_SIZE = 4096;
+        static char buf[READ_BUFFER_SIZE];
+        int len = recv(socket, buf, READ_BUFFER_SIZE, 0);
+        
+        if (len <= 0) {
+            printf("had to close\n");
+            close(socket);
+            continue;
         }
         
-        verify(n_files > 0);
+        buf[len] = 0;
+        //printf("%.*s\n", len, buf);
+        
+        input_request_handler handler;
+        handler.request_content = buf;
+        handler.parse(socket);
     }
+}
 #endif
+
+#if 0
+#include <string.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <limits.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <sys/un.h>
+#include <sys/socket.h>
+#include <sys/ioctl.h>
+#include <signal.h>
+#include <poll.h>
+
+void start_poll_server() {
+    int server_sockfd, client_sockfd;
+    int server_len, client_len;
+    struct sockaddr_un server_address;
+    struct sockaddr_un client_address;
+    int result;
+     
+    vector<pollfd> poll_set;
+    int numfds = 0;
+    int max_fd = 0;
     
-    reindex_database();
+    int sfd = create_and_bind(80);
+    verify(sfd != -1);
     
-    unordered_map<int, input_request*> fd_to_queue;
+    server_sockfd = sfd;
+    
+    verify(listen(sfd, SOMAXCONN) != -1);
+    
+    poll_set.resize(1);
+    poll_set[0].fd = sfd;
+    poll_set[0].events = POLLIN;
+    //signal(SIGPIPE, SIG_IGN);
+    //update_maxfd(server_sockfd, &max_fd);
+ 
+ 
+    while (1) {
+        char ch;
+        int fd_index;
+        int nread;
+        
+        //for (int i = 0; i < poll_set.size(); i++)
+            poll_set[0].events = POLLIN;
+         
+        //printf("Waiting for client (%d total)...\n", poll_set.size());
+        //result = select( (max_fd + 1), &testfds, (fd_set *)0, (fd_set *)0, (struct timeval *) 0);
+        poll(poll_set.data(), poll_set.size(), 10000);
+        
+        //vector<pollfd> new_poll_set(1);
+        //new_poll_set[0] = poll_set[0];
+        
+        for(fd_index = 0; fd_index < poll_set.size(); fd_index++)
+        {
+            //printf("index %d\n", fd_index);
+            if( poll_set[fd_index].revents & POLLIN ) {
+                if(poll_set[fd_index].fd == server_sockfd) {
+                    client_len = sizeof(client_address);
+                    client_sockfd = accept(server_sockfd, (struct sockaddr *)&client_address, (socklen_t *)&client_len);
+                    close(client_sockfd);
+                    
+                    write_only_header_answer(client_sockfd, 200);
+                     
+                    /*
+                    pollfd pfd;
+                    pfd.fd = client_sockfd;
+                    pfd.events = POLLIN;
+                    new_poll_set.push_back(pfd);
+                    
+                    printf("%d: Adding client on fd %d\n", fd_index, client_sockfd);*/
+                }
+                else {
+                    ioctl(poll_set[fd_index].fd, FIONREAD, &nread);
+                     
+                    if( nread == 0 )
+                    {
+                        printf("close that shit\n");
+                        close(poll_set[fd_index].fd);
+                        continue;
+                    }
+                    
+                    printf("Reading from client on %d\n", poll_set[fd_index].fd);
+                    char buffer[512 + 1];
+                    int len = read(poll_set[fd_index].fd, buffer, 512);
+                    if (len <= 0) {
+                        close(poll_set[fd_index].fd);
+                    }
+                    else {
+                        buffer[len] = 0;
+                        //printf("'%s'\n", buffer);
+                        
+                        input_request_handler handler;
+                        handler.request_content = buffer;
+                        int pret = handler.parse(poll_set[fd_index].fd);
+                        verify(pret >= 0);
+                    }
+                    
+                    /*
+                    ioctl(poll_set[fd_index].fd, FIONREAD, &nread);
+                     
+                    if( nread == 0 )
+                    {
+                        close(poll_set[fd_index].fd);
+                         
+                        numfds--;
+                         
+                         
+                        poll_set[fd_index].events = 0;
+                        printf("Removing client on fd %d\n", poll_set[fd_index].fd);
+                        poll_set[fd_index].fd = -1;
+                    }
+                 
+                    else {
+                        read(poll_set[fd_index].fd, &ch, 1);
+                        //printf("Serving client on fd %d -> '%c'\n", poll_set[fd_index].fd, ch);
+                        ch++;
+                        write(poll_set[fd_index].fd, &ch, 1);
+                    }*/
+                }
+            }
+        }
+        //poll_set = new_poll_set;
+    }
+}
+#endif
+
+void start_epoll_server() {
+    epoll_event event;
+    epoll_event* events = nullptr;
+
+    int sfd = create_and_bind(80);
+    verify(sfd != -1);
+
+    //verify(make_socket_non_blocking(sfd) != -1);
+    verify(listen(sfd, SOMAXCONN) != -1);
+
+    int efd = epoll_create1(0);
+    verify(efd != -1);
+
+    event.data.fd = sfd;
+    event.events = EPOLLIN | EPOLLET;
+    verify(epoll_ctl(efd, EPOLL_CTL_ADD, sfd, &event) != -1);
+
+    events = (epoll_event*)calloc(MAX_POLL_EVENTS, sizeof event);
+    
+    unordered_map<int, input_request_handler*> fd_to_queue;
     fd_to_queue.reserve(1000);
     
-    server_startup_prof.end_interval();
-    printf("Event loop reached in %.3f seconds\n", server_startup_prof.average_ns() / (double)1e9); fflush(stdout);
-
-    /* The event loop */
+    printf("Started event loop (epoll)\n"); fflush(stdout);
+    
     while (1) {
-        profiler.maybe_flushreset((li)1e9, &minute_accumulator_profiler);
+        profiler.maybe_flushreset((li)1e9 * 5, &minute_accumulator_profiler);
         minute_accumulator_profiler.maybe_flushreset((li)1e9 * 60, nullptr);
         
         int n = epoll_wait(efd, events, MAX_POLL_EVENTS, -1);
@@ -504,16 +723,12 @@ int main(int argc, char *argv[]) {
             if ((events[i].events & EPOLLERR) ||
                 (events[i].events & EPOLLHUP) ||
                 (!(events[i].events & EPOLLIN))) {
-                /* An error has occured on this fd, or the socket is not
-                   ready for reading (why were we notified then?) */
                 fprintf(stderr, "epoll error\n");
                 close(events[i].data.fd);
                 continue;
             }
 
             else if (sfd == events[i].data.fd) {
-                /* We have a notification on the listening socket, which
-                   means one or more incoming connections. */
                 while (1) {
                     VisibilityProfiler connection_accept_prof(CONNECTION_ACCEPT);
                     
@@ -522,12 +737,10 @@ int main(int argc, char *argv[]) {
                     int infd;
 
                     in_len = sizeof in_addr;
-                    infd = accept(sfd, &in_addr, &in_len);
+                    infd = accept4(sfd, &in_addr, &in_len, SOCK_CLOEXEC | SOCK_NONBLOCK);
                     profiler.delimiter(ACCEPT_TO_ACCEPT);
                     if (infd == -1) {
                         if ((errno == EAGAIN) ||  (errno == EWOULDBLOCK)) {
-                            /* We have processed all incoming
-                               connections. */
                             break;
                         }
                         else {
@@ -535,51 +748,33 @@ int main(int argc, char *argv[]) {
                             break;
                         }
                     }
-
-#ifndef SUBMISSION_MODE
-#if 1 && LOCAL
-                    char hbuf[NI_MAXHOST], sbuf[NI_MAXSERV];
-                    s = getnameinfo(&in_addr, in_len,
-                                    hbuf, sizeof hbuf,
-                                    sbuf, sizeof sbuf,
-                                    NI_NUMERICHOST | NI_NUMERICSERV);
-                    if (s == 0) {
-                        printf("Accepted connection on descriptor %d "
-                               "(host=%s, port=%s)\n", infd, hbuf, sbuf);
-                    }
-#endif
-#endif
-
-                    /* Make the incoming socket non-blocking and add it to the list of fds to monitor. */
-                    verify(make_socket_non_blocking(infd) != -1);
+                    
+                    //verify(make_socket_non_blocking(infd) != -1);
 
                     event.data.fd = infd;
                     event.events = EPOLLIN | EPOLLET;
                     verify(epoll_ctl(efd, EPOLL_CTL_ADD, infd, &event) != -1);
+                    
+                    int one = 1;
+                    verify(setsockopt(infd, SOL_TCP, TCP_NODELAY, &one, sizeof(one)) == 0);
                 }
                 continue;
             }
             else {
-                /* We have data on the fd waiting to be read. Read and
-                   display it. We must read whatever data is available
-                   completely, as we are running in edge-triggered mode
-                   and won't get a notification again for the same
-                   data. */
                 int done = 0;
                 
-                input_request*& q = fd_to_queue[events[i].data.fd];
+                input_request_handler*& q = fd_to_queue[events[i].data.fd];
 
                 while (1) {
                     ssize_t count;
-                    const int READ_BUFFER_SIZE = 512;
-                    static char buf[READ_BUFFER_SIZE + 1];
+                    const int READ_BUFFER_SIZE = 4096;
+                    static char buf[READ_BUFFER_SIZE * 2];
 
                     profiler.begin(READ_CALL);
                     count = read(events[i].data.fd, buf, READ_BUFFER_SIZE);
                     profiler.end(READ_CALL);
                     
                     if (count == -1) {
-                        /* If errno == EAGAIN, that means we have read all data. So go back to the main loop. */
                         if (errno != EAGAIN) {
                             perror("read");
                             done = 1;
@@ -589,28 +784,19 @@ int main(int argc, char *argv[]) {
                     else
                     {
                         buf[count] = 0;
-                        //printf("read %d bytes '%.*s'\n", count, count, buf);
                         if (count == 0) {
-                            /* End of file. The remote has closed the connection. */
                             done = 1;
                             break;
                         }
                     }
-
-                    /* Write the buffer to standard output */
-                    //verify(write(1, buf, count) != -1);
                     
                     if (q == 0) {
-                        q = new input_request;
+                        q = new input_request_handler;
                     }
                     q->request_content += buf;
                 }
                 
                 if (done) {
-                    //printf("Closed connection on descriptor %d\n", events[i].data.fd);
-
-                    /* Closing the descriptor will make epoll remove it
-                       from the set of descriptors which are monitored. */
                     close(events[i].data.fd);
                     
                     if (q)
@@ -620,18 +806,10 @@ int main(int argc, char *argv[]) {
                 }
                 
                 int pret = q->parse(events[i].data.fd);
-                
-                // no invalid http requests
                 verify(pret != -1);
 
                 if (pret > 0) {
-                    //printf("request parsed succesfully! discarding connection\n");
-                    
-                    // FIXME: disable Nagle algorithm
-                    // and/or make connection close right after ensuring that POST is correct -- DONE
-                    
                     delete q;
-                    //close(events[i].data.fd);
                     fd_to_queue.erase(events[i].data.fd);
                 }
             }
@@ -639,10 +817,18 @@ int main(int argc, char *argv[]) {
     }
 
     free(events);
-
     close(sfd);
+}
 
-    return EXIT_SUCCESS;
+int main(int argc, char *argv[]) {
+    inspect_server_parameters();
+    load_initial_data();
+    
+    start_epoll_server();
+    //start_bullshit_server();
+    //start_poll_server();
+    
+    return 0;
 }
 
 /* Answer validation */
@@ -666,6 +852,10 @@ struct AnswerValidator {
     
     void load(string answ_file_name) {
         ifstream file(answ_file_name);
+        verify(file);
+        printf("Loading validation from '%s'\n", answ_file_name.c_str());
+        verify(file);
+        
         string line;
         while (getline(file, line)) {
             istringstream line_stream(line);
@@ -704,6 +894,15 @@ struct AnswerValidator {
             
             next_answer = 0;
             next_answer_length = 0;
+        }
+        
+        static bool post_loaded = false;
+        if (!is_get && !post_loaded) {
+            expected_answer.clear();
+            post_loaded = true;
+            load("/var/loadtest/full_answers/phase_2_post.answ");
+            load("/var/loadtest/full_answers/phase_3_get.answ");
+            printf("Validator switched to phases 2-3\n");
         }
         
         string method = (is_get ? "GET" : "POST");
@@ -768,8 +967,10 @@ struct AnswerValidator {
 AnswerValidator validator;
 
 void initialize_validator() {
-    validator.load("../data/answers/phase_2_post.answ");
-    validator.load("../data/answers/phase_3_get.answ");
+    //validator.load("../data/answers/phase_2_post.answ");
+    //validator.load("../data/answers/phase_3_get.answ");
+    
+    validator.load("/var/loadtest/full_answers/phase_1_get.answ");
 }
 #endif
 
@@ -894,7 +1095,7 @@ void load_json_dump(char* mutable_buffer) {
     const Value& root = document[entity_to_string(e)];
     verify(root.IsArray());
     
-    printf("loading '%s', %d entries\n", entity_to_string(e), root.Size());
+    //printf("loading '%s', %d entries\n", entity_to_string(e), root.Size());
     
     if (e == Entity::USERS) user_by_id.reserve(user_by_id.size() + root.Size());
     if (e == Entity::LOCATIONS) location_by_id.reserve(location_by_id.size() + root.Size());
@@ -956,7 +1157,7 @@ void load_json_dump_from_file(string file_name) {
     
     delete[] buffer;
     
-    printf("Data loaded from file '%s'\n", file_name.c_str());
+    //printf("Data loaded from file '%s'\n", file_name.c_str());
 }
 
 Entity get_entity(const char*& path, int path_length) {
@@ -1375,7 +1576,8 @@ struct RequestHandler {
                 
                 bool filter_age = false;
                 if (from_age != MAGIC_INTEGER || to_age != MAGIC_INTEGER) {
-                    now = time(0);
+                    //now = time(0);
+                    now = current_timestamp;
                     gmtime_r(&now, &time_struct);
                     filter_age = true;
                 }
