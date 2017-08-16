@@ -33,6 +33,159 @@ const int MAX_POLL_EVENTS = 2;
 #define check(cond) {}
 #endif
 
+/* Profiling */
+
+
+using li = long long;
+
+li timespec_to_li(const timespec& ts) {
+    return ts.tv_sec * (li)1e9 + ts.tv_nsec;
+}
+
+struct IntervalProfiler {
+    li sum_time_ns = 0;
+    li open = 0;
+    int n_intervals = 0;
+    bool interval_open = false;
+    const char* name = "unnamed";
+    
+    void begin_interval() {
+        //printf("begin %s\n", name);
+        verify(!interval_open);
+        interval_open = true;
+        
+        timespec ts;
+        verify(clock_gettime(CLOCK_MONOTONIC, &ts) == 0);
+        open = -timespec_to_li(ts);
+    }
+    
+    void end_interval() {
+        //printf("end %s\n", name);
+        verify(interval_open);
+        interval_open = false;
+        n_intervals++;
+        
+        timespec ts;
+        verify(clock_gettime(CLOCK_MONOTONIC, &ts) == 0);
+        open += timespec_to_li(ts);
+        sum_time_ns += open;
+    }
+    
+    void delimiter_event() {
+        if (interval_open) {
+            end_interval();
+            begin_interval();
+        }
+        else {
+            begin_interval();
+        }
+    }
+    
+    double average_ns() const {
+        return n_intervals ? (sum_time_ns / (double)n_intervals) : 0.0;
+    }
+};
+
+enum ProfilerIntervals {
+    ACCEPT_TO_ACCEPT,
+    CONNECTION_ACCEPT,
+    READ_CALL,
+    PARSE_HEADERS,
+    PARSE_PATH,
+    PARSE_JSON_RAPIDJSON,
+    PARSE_JSON_CUSTOM,
+    BUILD_JSON_RESPONSE,
+    WRITE_RESPONSE,
+    
+    NUM_INTERVALS
+};
+
+struct Profiler {
+    const char* profiler_prefix;
+    IntervalProfiler intervals[NUM_INTERVALS];
+    
+    Profiler(const char* profiler_prefix = "[?] "): profiler_prefix(profiler_prefix) {
+        intervals[ACCEPT_TO_ACCEPT].name = "A";
+        intervals[CONNECTION_ACCEPT].name = "C";
+        intervals[READ_CALL].name = "R";
+        intervals[PARSE_HEADERS].name = "H";
+        intervals[PARSE_PATH].name = "P";
+        intervals[PARSE_JSON_RAPIDJSON].name = "JR";
+        intervals[PARSE_JSON_CUSTOM].name = "JC";
+        intervals[BUILD_JSON_RESPONSE].name = "B";
+        intervals[WRITE_RESPONSE].name = "W";
+    }
+    
+    void begin(int id) {
+        intervals[id].begin_interval();
+    }
+    
+    void end(int id) {
+        intervals[id].end_interval();
+    }
+    
+    void delimiter(int id) {
+        intervals[id].delimiter_event();
+    }
+    
+    void write_status() {
+        printf("%ssec %d avg (micro): ", profiler_prefix, (int)time(0));
+        for (int i = 0; i < NUM_INTERVALS; i++) {
+            if (i) printf(", ");
+            printf("%s %.2f (%d)", intervals[i].name, intervals[i].average_ns() / 1000.0, intervals[i].n_intervals);
+        }
+        printf("\n"); fflush(stdout);
+    }
+    
+    void submit_to_other(Profiler& accumulator) {
+        for (int i = 0; i < NUM_INTERVALS; i++) {
+            accumulator.intervals[i].n_intervals += intervals[i].n_intervals;
+            accumulator.intervals[i].sum_time_ns += intervals[i].sum_time_ns;
+        }
+    }
+    
+    void reset() {
+        for (int i = 0; i < NUM_INTERVALS; i++) {
+            intervals[i].sum_time_ns = 0;
+            intervals[i].n_intervals = 0;
+        }
+    }
+    
+    li last_flushreset = -1;
+    
+    void maybe_flushreset(li ns_interval, Profiler* accumulator) {
+        timespec now_ts;
+        clock_gettime(CLOCK_MONOTONIC, &now_ts);
+        li now = timespec_to_li(now_ts);
+        
+        if (last_flushreset == -1) {
+            last_flushreset = now;
+            return;
+        }
+        
+        if (now - last_flushreset >= ns_interval) {
+            last_flushreset = now;
+            write_status();
+            if (accumulator)
+                submit_to_other(*accumulator);
+            reset();
+        }
+    }
+};
+
+Profiler profiler("");
+Profiler minute_accumulator_profiler("[minute] ");
+
+struct VisibilityProfiler {
+    int id = -1;
+    
+    VisibilityProfiler(int id = -1): id(id) { profiler.begin(id); }
+    void end() { if (id != -1) profiler.end(id); id = -1; }
+    ~VisibilityProfiler() { if (id != -1) profiler.end(id); }
+};
+
+/* Networking & main loop */
+
 // networking template copyright: https://banu.com/blog/2/how-to-use-epoll-a-complete-example-in-c/
 
 static int make_socket_non_blocking(int sfd) {
@@ -112,6 +265,8 @@ void write_only_header_answer(int fd, int code) {
     check(code == 200 || code == 400 || code == 404);
     //printf("response %d\n\n", code);
     
+    VisibilityProfiler write_response_prof(WRITE_RESPONSE);
+    
 #define header_200 "HTTP/1.1 200 OK\r\n"
 #define header_400 "HTTP/1.1 400 Bad Request\r\n"
 #define header_404 "HTTP/1.1 404 Not Found\r\n"
@@ -151,6 +306,7 @@ struct input_request {
     string request_content;
     
     int parse(int fd) {
+        profiler.begin(PARSE_HEADERS);
         size_t prevbuflen = 0, method_len, path_len, num_headers;
         
         struct phr_header headers[100];
@@ -175,6 +331,7 @@ struct input_request {
 #endif
 
         if (pret < 0) {
+            profiler.end(PARSE_HEADERS);
             if (pret == -1) {
                 printf("Request failed to parse headers:\n'%s'\n", request_content.c_str());
                 fflush(stdout);
@@ -185,6 +342,7 @@ struct input_request {
         
         if (method_len == 3) {
             // GET request, can already answer
+            profiler.end(PARSE_HEADERS);
             
             int code = process_get_request(fd, path, path_len);
             if (code != 200)
@@ -202,6 +360,8 @@ struct input_request {
                 }
             }
             
+            profiler.end(PARSE_HEADERS);
+            
             if (content_length < 0) {
                 //printf("Request with no content length:\n'%s'\n", request_content.c_str());
                 write_only_header_answer(fd, 400);
@@ -212,7 +372,7 @@ struct input_request {
             
             int have_length = request_content.length() - pret;
             if (have_length < content_length) {
-                printf("warning -- large request (%d have, %d need)\n", have_length, content_length);
+                printf("warning -- large request (%d have, %d need)\n", have_length, content_length); fflush(stdout);
                 return -2;
             }
             
@@ -241,6 +401,9 @@ void reindex_database();
 void initialize_validator();
 
 int main(int argc, char *argv[]) {
+    IntervalProfiler server_startup_prof;
+    server_startup_prof.begin_interval();
+    
     verify(sizeof(int) == 4);
     verify(sizeof(time_t) == 8);
     //verify(0);
@@ -271,11 +434,27 @@ int main(int argc, char *argv[]) {
     /* Buffer where events are returned */
     events = (epoll_event*)calloc(MAX_POLL_EVENTS, sizeof event);
     
-    printf("Started server loop, port %d\n", port);
-    fprintf(stdout, "hello stdout\n"); fflush(stdout);
+    printf("Started server loop, port %d\n", port); fflush(stdout);
     //fprintf(stderr, "hello stderr\n"); fflush(stderr);
     if (port != wanted_port) {
         printf("WARNING: server started on port %d different from %d asked\n", port, wanted_port);
+    }
+    
+    {
+        IntervalProfiler ts_profiler;
+        ts_profiler.begin_interval();
+        
+        const int N_TEST_GETTIMES = 1e6;
+        li hash = 1;
+        for (int i = 0; i < N_TEST_GETTIMES; i++) {
+            timespec ts;
+            clock_gettime(CLOCK_MONOTONIC, &ts);
+            hash += timespec_to_li(ts);
+        }
+        
+        ts_profiler.end_interval();
+        
+        printf("clock_gettime cost (ns): %.5f, hash %lld\n", ts_profiler.average_ns() / (double)N_TEST_GETTIMES, hash); fflush(stdout);
     }
     
 #ifndef SUBMISSION_MODE
@@ -285,7 +464,7 @@ int main(int argc, char *argv[]) {
     load_json_dump_from_file("../data/data/users_1.json");
     load_json_dump_from_file("../data/data/visits_1.json");
 #else
-    printf("Running in submission mode, proceeding to unzip\n");
+    printf("Running in submission mode, proceeding to unzip\n"); fflush(stdout);
     {
         string unzip_cmd = "unzip -o -j /tmp/data/data.zip '*.json' -d data";
         int ec = system(unzip_cmd.c_str());
@@ -311,9 +490,15 @@ int main(int argc, char *argv[]) {
     
     unordered_map<int, input_request*> fd_to_queue;
     fd_to_queue.reserve(1000);
+    
+    server_startup_prof.end_interval();
+    printf("Event loop reached in %.3f seconds\n", server_startup_prof.average_ns() / (double)1e9); fflush(stdout);
 
     /* The event loop */
     while (1) {
+        profiler.maybe_flushreset((li)1e9, &minute_accumulator_profiler);
+        minute_accumulator_profiler.maybe_flushreset((li)1e9 * 60, nullptr);
+        
         int n = epoll_wait(efd, events, MAX_POLL_EVENTS, -1);
         for (int i = 0; i < n; i++) {
             if ((events[i].events & EPOLLERR) ||
@@ -330,12 +515,15 @@ int main(int argc, char *argv[]) {
                 /* We have a notification on the listening socket, which
                    means one or more incoming connections. */
                 while (1) {
+                    VisibilityProfiler connection_accept_prof(CONNECTION_ACCEPT);
+                    
                     struct sockaddr in_addr;
                     socklen_t in_len;
                     int infd;
 
                     in_len = sizeof in_addr;
                     infd = accept(sfd, &in_addr, &in_len);
+                    profiler.delimiter(ACCEPT_TO_ACCEPT);
                     if (infd == -1) {
                         if ((errno == EAGAIN) ||  (errno == EWOULDBLOCK)) {
                             /* We have processed all incoming
@@ -386,7 +574,10 @@ int main(int argc, char *argv[]) {
                     const int READ_BUFFER_SIZE = 512;
                     static char buf[READ_BUFFER_SIZE + 1];
 
+                    profiler.begin(READ_CALL);
                     count = read(events[i].data.fd, buf, READ_BUFFER_SIZE);
+                    profiler.end(READ_CALL);
+                    
                     if (count == -1) {
                         /* If errno == EAGAIN, that means we have read all data. So go back to the main loop. */
                         if (errno != EAGAIN) {
@@ -433,7 +624,6 @@ int main(int argc, char *argv[]) {
                 // no invalid http requests
                 verify(pret != -1);
 
-                
                 if (pret > 0) {
                     //printf("request parsed succesfully! discarding connection\n");
                     
@@ -900,8 +1090,10 @@ struct ResponseBuilder {
     }
     
     void write(int fd) {
+        profiler.begin(WRITE_RESPONSE);
         ::write(fd, buffer_begin, buffer_pos - buffer_begin);
         close(fd);
+        profiler.end(WRITE_RESPONSE);
     }
 };
 
@@ -932,7 +1124,7 @@ const char* percent_decode(const char* pos, const char* end) {
         }
         else {
             char c = *pos++;
-            *rewrite_pos++ = c;
+            *rewrite_pos++ = (c == '+' ? ' ' : c);
         }
     }
     
@@ -1035,8 +1227,13 @@ struct RequestHandler {
 #define validate_json()
 #endif
 
+#define begin_response() \
+    ResponseBuilder json; \
+    VisibilityProfiler build_json_response_prof(BUILD_JSON_RESPONSE);
+
 #define send_response() \
     json.embed_content_length(sizeof zero_offset_string, sizeof HTTP_OK_PREFIX - 1); \
+    build_json_response_prof.end(); \
     json.write(fd); \
     validate_json()
     
@@ -1050,7 +1247,7 @@ struct RequestHandler {
             if (!get_visits) {
                 // simple
                 
-                ResponseBuilder json;
+                begin_response();
                 
                 append_str(json, HTTP_OK_PREFIX "{\"id\":");
                 json.append_int(user.id);
@@ -1072,7 +1269,7 @@ struct RequestHandler {
             else {
                 // visits query
                 
-                ResponseBuilder json;
+                begin_response();
                 
                 append_str(json, HTTP_OK_PREFIX "{\"visits\":[");
                 int n_visits = 0;
@@ -1139,7 +1336,8 @@ struct RequestHandler {
             if (!get_avg) {
                 // simple
                 
-                ResponseBuilder json;
+                begin_response();
+                
                 append_str(json, HTTP_OK_PREFIX "{\"id\":");
                 json.append_int(location.id);
                 append_str(json, ",\"place\":\"");
@@ -1158,7 +1356,7 @@ struct RequestHandler {
             else {
                 // average query
                 
-                ResponseBuilder json;
+                begin_response();
                 
                 append_str(json, HTTP_OK_PREFIX "{\"avg\":");
                 
@@ -1251,7 +1449,7 @@ struct RequestHandler {
             
             Visit& visit = visit_it->second;
             
-            ResponseBuilder json;
+            begin_response();
             append_str(json, HTTP_OK_PREFIX "{\"id\":");
             json.append_int(visit.id);
             append_str(json, ",\"location\":");
@@ -1274,20 +1472,25 @@ struct RequestHandler {
     
     int handle_post(int fd, const char* body) {
 #define header_content_length_four "Content-Length: 2\r\n"
-#define header_content_type "Content-Type: application/json\r\n"
+//#define header_content_type "Content-Type: application/json\r\n"
+#define header_content_type
 #define HTTP_OK_WITH_EMPTY_JSON_RESPONSE header_200 header_connection_close header_server header_host header_content_type header_content_length_four header_rn "{}"
-        //printf("ok json '%s'\n", HTTP_OK_WITH_EMPTY_JSON_RESPONSE);
+//printf("ok json '%s'\n", HTTP_OK_WITH_EMPTY_JSON_RESPONSE);
 //#define HTTP_OK_WITH_EMPTY_JSON_RESPONSE "HTTP/1.1 200 OK\r\n\r\n{}"
 #define successful_update() \
+        profiler.begin(WRITE_RESPONSE); \
         write(fd, HTTP_OK_WITH_EMPTY_JSON_RESPONSE, sizeof(HTTP_OK_WITH_EMPTY_JSON_RESPONSE) - 1); \
-        close(fd)
+        close(fd); \
+        profiler.end(WRITE_RESPONSE)
         
         //successful_update();
         //return 200;
         
 #define declare_doc() \
+        profiler.begin(PARSE_JSON_RAPIDJSON); \
         Document json; \
         json.ParseInsitu((char*)body); \
+        profiler.end(PARSE_JSON_RAPIDJSON); \
         if (json.HasParseError()) return 400;
         
 #define begin_parsing_update(EntityType, entity) \
@@ -1303,20 +1506,21 @@ struct RequestHandler {
             declare_doc();
             
 #define iterate_over_fields \
+    VisibilityProfiler parse_json_custom_prof(PARSE_JSON_CUSTOM); \
     for (Value::ConstMemberIterator it = json.MemberBegin(); it != json.MemberEnd(); ++it) { \
                     const char* name = it->name.GetString(); \
                     const char* name_end = name + it->name.GetStringLength();
-#define end_fields_iteration return 400; }
+
+#define end_fields_iteration \
+    return 400; } \
+    parse_json_custom_prof.end();
                 
 #define string_field(field_name, min_length, max_length, save_to, code) \
                 {if (fast_is(name, name_end, field_name)) { \
-                    printf("matcher success with '%s'\n", field_name); fflush(stdout); \
                     if (!it->value.IsString()) return 400; \
                     if (save_to) return 400; \
                     save_to = it->value.GetString(); \
-                    printf("seems ok\n"); fflush(stdout); \
                     int real_length = utf8_string_length(save_to, it->value.GetStringLength()); \
-                    printf("length ok '%s' is %d passed\n", save_to, real_length); \
                     if (!(real_length >= min_length && real_length <= max_length)) return 400; \
                     code \
                     continue; \
@@ -1325,15 +1529,13 @@ struct RequestHandler {
                 
 #define integer_field(field_name, save_to, code) \
                 {if (fast_is(name, name_end, field_name)) { \
-                    printf("matcher success with '%s'\n", field_name); fflush(stdout); \
                     if (!it->value.IsInt()) return 400; \
                     if (save_to != MAGIC_INTEGER) return 400; \
                     save_to = it->value.GetInt(); \
                     code \
                     continue; \
                 }}
-        
-#if 1
+
         if (entity == Entity::USERS) {
             begin_parsing_update(User, user);
             
@@ -1397,12 +1599,8 @@ struct RequestHandler {
                 return 200;
             }
         }
-        else
-#endif
-        if (entity == Entity::LOCATIONS) {
+        else if (entity == Entity::LOCATIONS) {
             begin_parsing_update(Location, location);
-            
-            printf("parsing begin done\n"); fflush(stdout);
             
             const char* place = 0;
             const char* country = 0;
@@ -1410,7 +1608,6 @@ struct RequestHandler {
             int distance = MAGIC_INTEGER;
             
             iterate_over_fields {
-                printf("iterating field '%s'\n", name); fflush(stdout);
                 if (is_new)
                     integer_field("id", id, { if (location_by_id.find(id) != location_by_id.end()) return 400; });
                 
@@ -1419,8 +1616,6 @@ struct RequestHandler {
                 string_field("city", 1, 50, city, {});
                 integer_field("distance", distance, { if (distance < 0) return 400; });
             } end_fields_iteration
-            
-            printf("fields iterated success\n"); fflush(stdout);
             
             if (is_new) {
                 if (!(place && country && city && distance != MAGIC_INTEGER && id != MAGIC_INTEGER))
@@ -1448,7 +1643,6 @@ struct RequestHandler {
                 return 200;
             }
         }
-#if 1
         else {
             begin_parsing_update(Visit, visit);
             
@@ -1555,7 +1749,6 @@ struct RequestHandler {
                 return 200;
             }
         }
-#endif
         
         printf("VERY STRANGE -- failed to answer POST\n"); fflush(stdout);
         return 400;
@@ -1604,6 +1797,7 @@ int process_request_options(RequestHandler& handler, const char* path, const cha
 // omg boilerplate shit
 int process_get_request_raw(int fd, const char* path, int path_length) {
     //printf("GET %.*s\n", path_length, path);
+    VisibilityProfiler parse_path_prof(PARSE_PATH);
     
     RequestHandler handler;
     handler.is_get = true;
@@ -1635,14 +1829,13 @@ int process_get_request_raw(int fd, const char* path, int path_length) {
             return 404;
     }
     
-    map<string, string> opt_params;
-    
     //printf("entity %s id %d\n", entity_to_string(handler.entity), handler.id);
     
     int opts_code = process_request_options(handler, path, path_end);
     if (opts_code != 200)
         return opts_code;
     
+    parse_path_prof.end();
     int code = handler.handle_get(fd);
     return code;
 }
@@ -1660,8 +1853,9 @@ int process_get_request(int fd, const char* path, int path_length) {
 
 int process_post_request_raw(int fd, const char* path, int path_length, const char* body) {
     //printf("POST %.*s\n'%s'\n", path_length, path, body);
-    printf("POST %.*s '%s'\n", path_length, path, body);
-    fflush(stdout);
+    //printf("POST %.*s '%s'\n", path_length, path, body);
+    //fflush(stdout);
+    VisibilityProfiler parse_path_prof(PARSE_PATH);
     
     RequestHandler handler;
     handler.is_get = false;
@@ -1685,6 +1879,7 @@ int process_post_request_raw(int fd, const char* path, int path_length, const ch
     if (opts_code != 200)
         return opts_code;
     
+    parse_path_prof.end();
     int code = handler.handle_post(fd, body);
     return code;
 }
