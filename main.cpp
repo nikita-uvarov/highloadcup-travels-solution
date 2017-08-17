@@ -105,6 +105,8 @@ enum ProfilerIntervals {
     NUM_INTERVALS
 };
 
+li max_request_ns = 0;
+
 struct Profiler {
     const char* profiler_prefix;
     IntervalProfiler intervals[NUM_INTERVALS];
@@ -138,6 +140,10 @@ struct Profiler {
         for (int i = 0; i < NUM_INTERVALS; i++) {
             if (i) printf(", ");
             printf("%s %.2f (%d)", intervals[i].name, intervals[i].average_ns() / 1000.0, intervals[i].n_intervals);
+        }
+        if (strlen(profiler_prefix) == 0) {
+            printf(" max request %.3f mks", max_request_ns / 1000.0);
+            max_request_ns = 0;
         }
         printf("\n"); fflush(stdout);
     }
@@ -350,7 +356,8 @@ struct travels_input_request_handler {
         profiler.begin(PARSE_HEADERS);
         size_t prevbuflen = 0, method_len, path_len, num_headers;
         
-        struct phr_header headers[10];
+        // FIXME: 10 here is enough
+        struct phr_header headers[15];
         num_headers = sizeof(headers) / sizeof(headers[0]);
         const char* path;
         const char* method;
@@ -842,14 +849,14 @@ void start_epoll_server() {
                     continue;
                 }
                 
-                li t_ready = get_ns_timestamp();
-                global_t_ready = t_ready;
+                //li t_ready = get_ns_timestamp();
+                global_t_ready = get_ns_timestamp();
                 int pret = q->parse(events[i].data.fd);
                 verify(pret != -1);
 
                 if (pret > 0) {
-                    li t_end = get_ns_timestamp();
-                    printf("processed in %.3f mks, without read %.3f mks\n", (t_end - t_start) / 1000.0, (t_end - t_ready) / 1000.0);
+                    //li t_end = get_ns_timestamp();
+                    //printf("processed in %.3f mks, without read %.3f mks\n", (t_end - t_start) / 1000.0, (t_end - t_ready) / 1000.0);
                     
                     q->request_content = "";
                     
@@ -896,6 +903,14 @@ int main(int argc, char *argv[]) {
 #include "rapidjson/include/rapidjson/error/en.h"
 
 using namespace rapidjson;
+
+string json_escape_string(const string& str) {
+    StringBuffer s;
+    Writer<StringBuffer> writer(s);
+    writer.String(str.data(), str.length());
+    string result = s.GetString();
+    return result;
+}
 
 #ifndef DISABLE_VALIDATE
 struct AnswerValidator {
@@ -1060,9 +1075,9 @@ struct DatedVisit {
 };
 
 struct User {
-    int id;
+    int id = -1;
     string email;
-    string first_name, last_name;
+    string first_name, last_name; // json-escaped
     char gender;
     timestamp birth_date;
     
@@ -1070,44 +1085,39 @@ struct User {
 };
 
 struct Location {
-    int id;
-    string place;
-    string country;
-    string city;
+    int id = -1;
+    string place; // json-escaped
+    string country; // json-escaped
+    string country_unescaped; // original
+    string city; // json-escaped
     int distance;
     
     vector<DatedVisit> visits;
 };
 
 struct Visit {
-    int id;
+    int id = -1;
     int location_id;
     int user_id;
     timestamp visited_at;
     char mark;
 };
 
-unordered_map<int, User> user_by_id;
-unordered_map<int, Location> location_by_id;
-unordered_map<int, Visit> visit_by_id;
+vector<User> user_by_id;
+vector<Location> location_by_id;
+vector<Visit> visit_by_id;
 unordered_set<string> all_user_emails;
 
-vector<User> fast_users;
-vector<Location> fast_locations;
-vector<Visit> fast_visits;
+template<class T> void maybe_resize(vector<T>& by_id, int id) {
+    if (id >= (int)by_id.size())
+        by_id.resize(id + 1);
+}
 
-template<class T> void build_fast(unordered_map<int, T>& m, vector<T>& to) {
-    int max_id = 0;
-    for (auto& it: m)
-        max_id = max(max_id, it.first);
+template<class T>
+bool id_exists(vector<T>& by_id, int id) {
+    if (id < 0 || id >= (int)by_id.size()) return false;
     
-    to.clear();
-    to.resize(max_id + 1);
-    
-    for (auto& it: m)
-        to[it.first] = it.second;
-    
-    printf("fast built, %d elements -> %d ids\n", (int)m.size(), (int)to.size());
+    return by_id[id].id == id;
 }
 
 enum class Entity : char {
@@ -1127,31 +1137,40 @@ const char* entity_to_string(Entity e) {
 }
 
 void reindex_database() {
-    for (auto& it: user_by_id)
-        it.second.visits.clear();
+    for (int id = 0; id < (int)user_by_id.size(); id++)
+        if (user_by_id[id].id == id)
+            user_by_id[id].visits.clear();
     
-    for (auto& it: location_by_id)
-        it.second.visits.clear();
+    for (int id = 0; id < (int)location_by_id.size(); id++)
+        if (location_by_id[id].id == id)
+            location_by_id[id].visits.clear();
     
-    for (auto& it: visit_by_id) {
-        Visit& visit = it.second;
+    for (int id = 0; id < (int)visit_by_id.size(); id++) {
+        if (visit_by_id[id].id != id)
+            continue;
+        
+        Visit& visit = visit_by_id[id];
+        
         DatedVisit dv = { visit.id, visit.visited_at };
         user_by_id[visit.user_id].visits.push_back(dv);
         location_by_id[visit.location_id].visits.push_back(dv);
     }
     
-    for (auto& it: user_by_id)
-        sort(all(it.second.visits));
+    for (int id = 0; id < (int)user_by_id.size(); id++)
+        if (user_by_id[id].id == id)
+            sort(all(user_by_id[id].visits));
     
-    for (auto& it: location_by_id)
-        sort(all(it.second.visits));
+    for (int id = 0; id < (int)location_by_id.size(); id++)
+        if (location_by_id[id].id == id)
+            sort(all(location_by_id[id].visits));
+
+    const int RESERVE = 4000;
+    visit_by_id.reserve(visit_by_id.size() + RESERVE);
+    location_by_id.reserve(location_by_id.size() + RESERVE);
+    user_by_id.reserve(user_by_id.size() + RESERVE);
     
     printf("Database is ready\n");
     fflush(stdout);
-    
-    build_fast(user_by_id, fast_users);
-    build_fast(visit_by_id, fast_visits);
-    build_fast(location_by_id, fast_locations);
 }
 
 void load_json_dump(char* mutable_buffer) {
@@ -1175,6 +1194,7 @@ void load_json_dump(char* mutable_buffer) {
     
     //printf("loading '%s', %d entries\n", entity_to_string(e), root.Size());
     
+    // FIXME: add hints knowing real data size and/or estimations by file size
     if (e == Entity::USERS) user_by_id.reserve(user_by_id.size() + root.Size());
     if (e == Entity::LOCATIONS) location_by_id.reserve(location_by_id.size() + root.Size());
     if (e == Entity::VISITS) visit_by_id.reserve(visit_by_id.size() + root.Size());
@@ -1184,29 +1204,33 @@ void load_json_dump(char* mutable_buffer) {
         int id = o["id"].GetInt();
         
         if (e == Entity::USERS) {
+            maybe_resize(user_by_id, id);
             User& new_user = user_by_id[id];
             
             new_user.id = id;
             new_user.email = o["email"].GetString();
-            new_user.first_name = o["first_name"].GetString();
-            new_user.last_name = o["last_name"].GetString();
+            new_user.first_name = json_escape_string(o["first_name"].GetString());
+            new_user.last_name = json_escape_string(o["last_name"].GetString());
             new_user.gender = o["gender"].GetString()[0];
             new_user.birth_date = o["birth_date"].GetInt();
             
             verify(new_user.gender == 'm' || new_user.gender == 'f');
         }
         else if (e == Entity::LOCATIONS) {
+            maybe_resize(location_by_id, id);
             Location& new_location = location_by_id[id];
             
             new_location.id = id;
-            new_location.place = o["place"].GetString();
-            new_location.country = o["country"].GetString();
-            new_location.city = o["city"].GetString();
+            new_location.place = json_escape_string(o["place"].GetString());
+            new_location.country_unescaped = o["country"].GetString();
+            new_location.country = json_escape_string(new_location.country_unescaped);
+            new_location.city = json_escape_string(o["city"].GetString());
             new_location.distance = o["distance"].GetInt();
             
             verify(new_location.distance >= 0);
         }
         else {
+            maybe_resize(visit_by_id, id);
             Visit& new_visit = visit_by_id[id];
             
             new_visit.id = id;
@@ -1290,7 +1314,7 @@ bool parse_timestamp(const char* str, const char* to, timestamp& value) {
     return correct && str == to;
 }
 
-const int MAX_RESPONSE_SIZE = 4096;
+const int MAX_RESPONSE_SIZE = 4096 * 2;
 char shared_buffer[MAX_RESPONSE_SIZE];
 
 const int MAX_INTEGER_SIZE = 30;
@@ -1350,20 +1374,10 @@ struct ResponseBuilder {
         }
     }
     
-#if 0
     void append(const char* data, int length) {
         realloc_if_needed(length);
         memcpy(buffer_pos, data, length);
         buffer_pos += length;
-    }
-#endif
-    
-    void append(const char* data, int length) {
-        memcpy(buffer_pos, data, length);
-        buffer_pos += length;
-        /*while (length--) {
-            *buffer_pos++ = *data++;
-        }*/
     }
     
     void append_int(int x) {
@@ -1380,10 +1394,10 @@ struct ResponseBuilder {
     
     void write(int fd) {
         profiler.begin(WRITE_RESPONSE);
-        li t0 = get_ns_timestamp();
+        //li t0 = get_ns_timestamp();
         ::write(fd, buffer_begin, buffer_pos - buffer_begin);
-        li t1 = get_ns_timestamp();
-        printf("write call taken %.3f mks\n", (t1 - t0) / 1000.0);
+        //li t1 = get_ns_timestamp();
+        //printf("write call taken %.3f mks\n", (t1 - t0) / 1000.0);
         //close(fd);
         profiler.end(WRITE_RESPONSE);
     }
@@ -1531,10 +1545,8 @@ struct RequestHandler {
     
     int handle_get(int fd) {
         if (entity == Entity::USERS) {
-            auto user_it = user_by_id.find(id);
-            if (user_it == user_by_id.end()) return 404;
-            
-            User& user = user_it->second;
+            if (!id_exists(user_by_id, id)) return 404;
+            User& user = user_by_id[id];
             
             if (!get_visits) {
                 // simple
@@ -1545,11 +1557,11 @@ struct RequestHandler {
                 json.append_int(user.id);
                 append_str(json, ",\"email\":\"");
                 json.append(user.email.data(), user.email.length());
-                append_str(json, "\",\"first_name\":\"");
+                append_str(json, "\",\"first_name\":");
                 json.append(user.first_name.data(), user.first_name.length());
-                append_str(json, "\",\"last_name\":\"");
+                append_str(json, ",\"last_name\":");
                 json.append(user.last_name.data(), user.last_name.length());
-                append_str(json, "\",\"gender\":\"");
+                append_str(json, ",\"gender\":\"");
                 json.append(&user.gender, 1);
                 append_str(json, "\",\"birth_date\":");
                 json.append_int(user.birth_date);
@@ -1582,25 +1594,14 @@ struct RequestHandler {
                         return 400;
                 }
                 
-#if 0
-                int n = it_end - it;
-                if (n < 0) n = 0;
-                
-                for (int i = 0; i < n; i++) {
-                    char str[] = "{\"mark\":3,\"visited_at\":1403153768,\"place\":\"averageaverage\"},";
-                    for (int t = 0; t < sizeof(str); t += 4)
-                        json.append("xxxx", 4);
-                    //json.append(str, sizeof(str) - 1);
-                }
-#elif 1
-                li startb = get_ns_timestamp() - global_t_ready;
+                //li startb = get_ns_timestamp() - global_t_ready;
                 while (it < it_end) {
-                    Visit& visit = fast_visits[it->id];
+                    Visit& visit = visit_by_id[it->id];
                     it++;
-                    Location& location = fast_locations[visit.location_id];
+                    Location& location = location_by_id[visit.location_id];
                     
                     if (country_ptr_begin) {
-                        if (country_ptr_end - country_ptr_begin != (long)location.country.length() || memcmp(country_ptr_begin, location.country.data(), location.country.length()))
+                        if (country_ptr_end - country_ptr_begin != (long)location.country_unescaped.length() || memcmp(country_ptr_begin, location.country_unescaped.data(), location.country_unescaped.length()))
                             continue;
                     }
                     
@@ -1618,58 +1619,24 @@ struct RequestHandler {
                     n_visits++;
                     
                     json.append_int(visit.mark);
-                    append_str(json,",\"visited_at\":");
+                    append_str(json, ",\"visited_at\":");
                     json.append_int(visit.visited_at);
-                    append_str(json,",\"place\":\"");
+                    append_str(json, ",\"place\":");
                     json.append(location.place.data(), location.place.length());
-                    append_str(json,"\"}");
+                    append_str(json, "}");
                 }
-#else
-                while (it < it_end) {
-                    //Visit& visit = visit_by_id[it->id];
-                    it++;
-                    //Location& location = location_by_id[visit.location_id];
-                    
-                    if (country_ptr_begin) {
-                        //if (country_ptr_end - country_ptr_begin != (long)location.country.length() || memcmp(country_ptr_begin, location.country.data(), location.country.length()))
-                        //    continue;
-                    }
-                    
-                    if (to_distance != MAGIC_INTEGER) {
-                        //if (location.distance >= to_distance)
-                        //    continue;
-                    }
-                    
-                    if (n_visits) {
-                        append_str(json, ",{\"mark\":");
-                    }
-                    else {
-                        append_str(json, "{\"mark\":");
-                    }
-                    n_visits++;
-                    
-                    json.append_int(100500);
-                    append_str(json,",\"visited_at\":");
-                    json.append_int(100600);
-                    append_str(json,",\"place\":\"");
-                    json.append("averageaverage", 14);
-                    append_str(json,"\"}");
-                }
-#endif
                 
                 append_str(json, "]}");
                 
-                li endb = get_ns_timestamp() - global_t_ready;
-                printf("timings %.3f %.3f\n", startb / 1000.0, endb / 1000.0);
+                //li endb = get_ns_timestamp() - global_t_ready;
+                //printf("timings %.3f %.3f\n", startb / 1000.0, endb / 1000.0);
                 send_response();
                 return 200;
             }
         }
         else if (entity == Entity::LOCATIONS) {
-            auto location_it = location_by_id.find(id);
-            if (location_it == location_by_id.end()) return 404;
-            
-            Location& location = location_it->second;
+            if (!id_exists(location_by_id, id)) return 404;
+            Location& location = location_by_id[id];
             
             if (!get_avg) {
                 // simple
@@ -1678,13 +1645,13 @@ struct RequestHandler {
                 
                 append_str(json, HTTP_OK_PREFIX "{\"id\":");
                 json.append_int(location.id);
-                append_str(json, ",\"place\":\"");
+                append_str(json, ",\"place\":");
                 json.append(location.place.data(), location.place.length());
-                append_str(json, "\",\"country\":\"");
+                append_str(json, ",\"country\":");
                 json.append(location.country.data(), location.country.length());
-                append_str(json, "\",\"city\":\"");
+                append_str(json, ",\"city\":");
                 json.append(location.city.data(), location.city.length());
-                append_str(json, "\",\"distance\":");
+                append_str(json, ",\"distance\":");
                 json.append_int(location.distance);
                 append_str(json, "}");
                 
@@ -1774,7 +1741,7 @@ struct RequestHandler {
                 }
                 else {
                     static char mark_avg[50];
-                    sprintf(mark_avg, "%.5f}", mark_sum / (double)n_marks);
+                    sprintf(mark_avg, "%.5f}", mark_sum / (double)n_marks + 1e-12);
                     json.append(mark_avg, strlen(mark_avg));
                 }
                 
@@ -1783,10 +1750,8 @@ struct RequestHandler {
             }
         }
         else {
-            auto visit_it = visit_by_id.find(id);
-            if (visit_it == visit_by_id.end()) return 404;
-            
-            Visit& visit = visit_it->second;
+            if (!id_exists(visit_by_id, id)) return 404;
+            Visit& visit = visit_by_id[id];
             
             begin_response();
             append_str(json, HTTP_OK_PREFIX "{\"id\":");
@@ -1809,15 +1774,15 @@ struct RequestHandler {
         return 400;
     }
     
-    
-    
     void performance_test(int mode) {
         const int N_TRIES = 10;
         li hash = 0;
         
         vector<int> ids;
-        for (auto it: user_by_id) {
-            ids.push_back(it.first);
+        for (int id = 0; id < (int)user_by_id.size(); id++) {
+            if (user_by_id[id].id != id) continue;
+            
+            ids.push_back(id);
             if (ids.size() > 10000) break;
         }
         
@@ -1957,9 +1922,8 @@ struct RequestHandler {
 #define begin_parsing_update(EntityType, entity) \
             EntityType* entity = nullptr; \
             if (!is_new) { \
-                auto entity_it = (entity ## _by_id).find(id); \
-                if (entity_it == (entity ## _by_id).end()) return 404; \
-                entity = &entity_it->second; \
+                if (!id_exists((entity ## _by_id), id)) return 404; \
+                entity = &((entity ## _by_id)[id]); \
             } \
             else { \
                 id = MAGIC_INTEGER; \
@@ -2008,7 +1972,7 @@ struct RequestHandler {
                 
             iterate_over_fields {
                 if (is_new)
-                    integer_field("id", id, { if (user_by_id.find(id) != user_by_id.end()) return 400; });
+                    integer_field("id", id, { if (id_exists(user_by_id, id)) return 400; });
                 
                 string_field("first_name", 1, 50, first_name, {});
                 string_field("last_name", 1, 50, last_name, {});
@@ -2027,11 +1991,12 @@ struct RequestHandler {
                 
                 successful_update();
                 
+                maybe_resize(user_by_id, id);
                 User& new_user = user_by_id[id];
                 new_user.id = id;
                 new_user.email = email;
-                new_user.first_name = first_name;
-                new_user.last_name = last_name;
+                new_user.first_name = json_escape_string(first_name);
+                new_user.last_name = json_escape_string(last_name);
                 new_user.gender = *gender;
                 new_user.birth_date = birth_date;
                 all_user_emails.emplace(email);
@@ -2052,8 +2017,8 @@ struct RequestHandler {
                     all_user_emails.emplace(user->email);
                 }
                 
-                if (first_name) user->first_name = first_name;
-                if (last_name) user->last_name = last_name;
+                if (first_name) user->first_name = json_escape_string(first_name);
+                if (last_name) user->last_name = json_escape_string(last_name);
                 if (gender) user->gender = *gender;
                 if (birth_date != MAGIC_INTEGER) user->birth_date = birth_date;
                 
@@ -2070,7 +2035,7 @@ struct RequestHandler {
             
             iterate_over_fields {
                 if (is_new)
-                    integer_field("id", id, { if (location_by_id.find(id) != location_by_id.end()) return 400; });
+                    integer_field("id", id, { if (id_exists(location_by_id, id)) return 400; });
                 
                 string_field("place", 0, (int)1e9, place, {});
                 string_field("country", 1, 50, country, {});
@@ -2084,11 +2049,13 @@ struct RequestHandler {
                 
                 successful_update();
                 
+                maybe_resize(location_by_id, id);
                 Location& new_location = location_by_id[id];
                 new_location.id = id;
-                new_location.place = place;
-                new_location.country = country;
-                new_location.city = city;
+                new_location.place = json_escape_string(place);
+                new_location.country_unescaped = country;
+                new_location.country = json_escape_string(new_location.country_unescaped);
+                new_location.city = json_escape_string(city);
                 new_location.distance = distance;
                 
                 return 200;
@@ -2096,9 +2063,19 @@ struct RequestHandler {
             else {
                 successful_update();
                 
-                if (place) location->place = place;
-                if (country) location->country = country;
-                if (city) location->city = city;
+                if (place) {
+                    location->place = json_escape_string(place);
+                }
+                
+                if (country) {
+                    location->country_unescaped = country;
+                    location->country = json_escape_string(location->country_unescaped);
+                }
+                
+                if (city) {
+                    location->city = json_escape_string(city);
+                }
+                
                 if (distance != MAGIC_INTEGER) location->distance = distance;
                 
                 return 200;
@@ -2117,22 +2094,20 @@ struct RequestHandler {
             
             iterate_over_fields {
                 if (is_new)
-                    integer_field("id", id, { if (location_by_id.find(id) != location_by_id.end()) return 400; });
+                    integer_field("id", id, { if (id_exists(visit_by_id, id)) return 400; });
                 
                 integer_field("location", location_id, {
-                    auto it = location_by_id.find(location_id);
-                    if (it == location_by_id.end())
+                    if (!id_exists(location_by_id, location_id))
                         return 404;
                     
-                    location = &it->second;
+                    location = &location_by_id[location_id];
                 });
                 
                 integer_field("user", user_id, {
-                    auto it = user_by_id.find(user_id);
-                    if (it == user_by_id.end())
+                    if (!id_exists(user_by_id, user_id))
                         return 404;
                     
-                    user = &it->second;
+                    user = &user_by_id[user_id];
                 });
                 
                 integer_field("visited_at", visited_at, { if (!(visited_at >= MIN_ALLOWED_VISIT_DATE && visited_at <= MAX_ALLOWED_VISIT_DATE)) return 400; });
@@ -2145,6 +2120,7 @@ struct RequestHandler {
                 
                 successful_update();
                 
+                maybe_resize(visit_by_id, id);
                 Visit& new_visit = visit_by_id[id];
                 new_visit.id = id;
                 new_visit.visited_at = visited_at;
@@ -2220,9 +2196,11 @@ struct RequestHandler {
 };
 
 void do_benchmark() {
+#if 0
     RequestHandler handler;
     for (int mode = 0; mode < 3; mode++)
         handler.performance_test(mode);
+#endif
 }
 
 int process_request_options(RequestHandler& handler, const char* path, const char* path_end) {
@@ -2307,11 +2285,18 @@ int process_get_request_raw(int fd, const char* path, int path_length) {
     return code;
 }
 
+const li LONG_REQUEST_NS = 250 * (li)1000; // 500 mks is long
+
 int process_get_request(int fd, const char* path, int path_length) {
 #ifndef DISABLE_VALIDATE
     string path_backup(path, path + path_length);
 #endif
     int code = process_get_request_raw(fd, path, path_length);
+    li t_answered = get_ns_timestamp();
+    if (t_answered - global_t_ready > LONG_REQUEST_NS) {
+        printf("long GET %.*s (%d): %.3f mks\n", path_length, path, code, (t_answered - global_t_ready) / 1000.0);
+    }
+    max_request_ns = max(max_request_ns, t_answered - global_t_ready);
 #ifndef DISABLE_VALIDATE
     validator.check_answer(true, path_backup.c_str(), path_length, code, 0, 0);
 #endif
@@ -2353,6 +2338,12 @@ int process_post_request_raw(int fd, const char* path, int path_length, const ch
 
 int process_post_request(int fd, const char* path, int path_length, const char* body) {
     int code = process_post_request_raw(fd, path, path_length, body);
+    li t_answered = get_ns_timestamp();
+    if (t_answered - global_t_ready > LONG_REQUEST_NS) {
+        printf("long POST %.*s '%s' (%d): %.3f mks\n", path_length, path, body, code, (t_answered - global_t_ready) / 1000.0);
+    }
+    max_request_ns = max(max_request_ns, t_answered - global_t_ready);
+    
 #ifndef DISABLE_VALIDATE
     validator.check_answer(false, path, path_length, code, 0, 0);
 #endif
