@@ -23,6 +23,8 @@ const int MAX_POLL_EVENTS = 128;
 
 //#undef SUBMISSION_MODE
 
+#define DISABLE_VALIDATE
+
 #define verify(cond) if (!(cond)) { fprintf(stderr, "Verification failed: '" #cond "' on line %d\n", __LINE__); perror("perror"); fflush(stderr); abort(); }
 
 #ifndef SUBMISSION_MODE
@@ -37,6 +39,12 @@ using li = long long;
 
 li timespec_to_li(const timespec& ts) {
     return ts.tv_sec * (li)1e9 + ts.tv_nsec;
+}
+
+li get_ns_timestamp() {
+    timespec ts;
+    verify(clock_gettime(CLOCK_MONOTONIC, &ts) == 0);
+    return timespec_to_li(ts);
 }
 
 struct IntervalProfiler {
@@ -285,6 +293,8 @@ static int create_and_bind(int port) {
 
 #include "picohttpparser/picohttpparser.h"
 
+bool was_really_closed = false;
+
 void write_only_header_answer(int fd, int code) {
     check(code == 200 || code == 400 || code == 404);
     //printf("response %d\n\n", code);
@@ -296,11 +306,15 @@ void write_only_header_answer(int fd, int code) {
 #define header_404 "HTTP/1.1 404 Not Found\r\n"
     
 #define header_content_length_zero "Content-Length: 0\r\n"
-#define header_connection_close "Connection: close\r\n"
+//#define header_connection_close "Connection: keep-alive\r\n"
+#define header_connection_close ""
 #define header_server "Server: 1\r\n"
 //#define header_host "Host: travels.com\r\n"
 #define header_host
 #define header_rn "\r\n"
+    
+// if doesn't work, easy to fix
+#define header_connection_close_real "Connection: keep-alive\r\n"
     
     if (code == 200) {
 #define response_200 header_200 header_content_length_zero header_connection_close header_server header_host header_rn
@@ -309,18 +323,21 @@ void write_only_header_answer(int fd, int code) {
     }
     
     if (code == 400) {
-#define response_400 header_400 header_content_length_zero header_connection_close header_server header_host header_rn
+#define response_400 header_400 header_content_length_zero header_connection_close_real header_server header_host header_rn
         write(fd, response_400, sizeof response_400 - 1);
+        //close(fd);
+        //was_really_closed = true;
 #undef response_400
     }
     
     if (code == 404) {
-#define response_404 header_404 header_content_length_zero header_connection_close header_server header_host header_rn
+#define response_404 header_404 header_content_length_zero header_connection_close_real header_server header_host header_rn
         write(fd, response_404, sizeof response_404 - 1);
+        //close(fd);
+        //was_really_closed = true;
 #undef response_404
     }
     
-    close(fd);
 }
 
 int process_get_request(int fd, const char* path, int path_length);
@@ -333,7 +350,7 @@ struct travels_input_request_handler {
         profiler.begin(PARSE_HEADERS);
         size_t prevbuflen = 0, method_len, path_len, num_headers;
         
-        struct phr_header headers[100];
+        struct phr_header headers[10];
         num_headers = sizeof(headers) / sizeof(headers[0]);
         const char* path;
         const char* method;
@@ -427,11 +444,18 @@ void reindex_database();
 
 void initialize_validator();
 
-void load_options_from_file(string file_name) {
+void load_options_from_file(string file_name, bool must_exist) {
     ifstream is(file_name);
-    verify(is);
+    if (must_exist) {
+        verify(is);
+    }
+    else if (!is) {
+        printf("Tried to load options from '%s' unsuccessfully\n", file_name.c_str()); fflush(stdout);
+        return;
+    }
+    
     verify(is >> current_timestamp >> is_rated_run);
-    printf("Options loaded from '%s': timestamp %d, is rated %d\n", file_name.c_str(), current_timestamp, is_rated_run);
+    printf("Options loaded from '%s': timestamp %d, is rated %d\n", file_name.c_str(), current_timestamp, is_rated_run); fflush(stdout);
 }
 
 bool string_ends_with(string a, string b) {
@@ -444,8 +468,11 @@ void load_initial_data() {
     IntervalProfiler initial_data_prof;
     initial_data_prof.begin_interval();
     
-#if 0
+#ifndef DISABLE_VALIDATE
     initialize_validator();
+#endif
+    
+#if 0
     
     load_json_dump_from_file("../data/data/locations_1.json");
     load_json_dump_from_file("../data/data/users_1.json");
@@ -453,6 +480,8 @@ void load_initial_data() {
 #else
     printf("Running in submission mode, proceeding to unzip\n"); fflush(stdout);
     {
+        load_options_from_file("/tmp/data/options.txt", false);
+        
         string unzip_cmd = "unzip -o -j /tmp/data/data.zip '*' -d data >/dev/null";
         int ec = system(unzip_cmd.c_str());
         verify(ec == 0);
@@ -476,7 +505,7 @@ void load_initial_data() {
                 load_json_dump_from_file(db_file_name.c_str());
             }
             else if (string_ends_with(db_file_name, ".txt")) {
-                load_options_from_file(db_file_name);
+                load_options_from_file(db_file_name, true);
             }
         }
         printf("files %s\n", concat.c_str()); fflush(stdout);
@@ -690,6 +719,8 @@ void start_poll_server() {
 }
 #endif
 
+li global_t_ready;
+
 void start_epoll_server() {
     epoll_event event;
     epoll_event* events = nullptr;
@@ -739,6 +770,7 @@ void start_epoll_server() {
                     in_len = sizeof in_addr;
                     infd = accept4(sfd, &in_addr, &in_len, SOCK_CLOEXEC | SOCK_NONBLOCK);
                     profiler.delimiter(ACCEPT_TO_ACCEPT);
+                    //printf("accept socket %d\n", infd);
                     if (infd == -1) {
                         if ((errno == EAGAIN) ||  (errno == EWOULDBLOCK)) {
                             break;
@@ -761,9 +793,11 @@ void start_epoll_server() {
                 continue;
             }
             else {
+                li t_start = get_ns_timestamp();
                 int done = 0;
                 
                 input_request_handler*& q = fd_to_queue[events[i].data.fd];
+                //printf("read ready for socket %d\n", events[i].data.fd);
 
                 while (1) {
                     ssize_t count;
@@ -797,20 +831,38 @@ void start_epoll_server() {
                 }
                 
                 if (done) {
+#if 0
                     close(events[i].data.fd);
                     
                     if (q)
                         delete q;
                     fd_to_queue.erase(events[i].data.fd);
                     continue;
+#endif
+                    continue;
                 }
                 
+                li t_ready = get_ns_timestamp();
+                global_t_ready = t_ready;
                 int pret = q->parse(events[i].data.fd);
                 verify(pret != -1);
 
                 if (pret > 0) {
+                    li t_end = get_ns_timestamp();
+                    printf("processed in %.3f mks, without read %.3f mks\n", (t_end - t_start) / 1000.0, (t_end - t_ready) / 1000.0);
+                    
+                    q->request_content = "";
+                    
+                    if (was_really_closed) {
+                        delete q;
+                        fd_to_queue.erase(events[i].data.fd);
+                        was_really_closed = false;
+                    }
+                    
+#if 0
                     delete q;
                     fd_to_queue.erase(events[i].data.fd);
+#endif
                 }
             }
         }
@@ -820,9 +872,13 @@ void start_epoll_server() {
     close(sfd);
 }
 
+void do_benchmark();
+
 int main(int argc, char *argv[]) {
     inspect_server_parameters();
     load_initial_data();
+    
+    do_benchmark();
     
     start_epoll_server();
     //start_bullshit_server();
@@ -841,7 +897,7 @@ int main(int argc, char *argv[]) {
 
 using namespace rapidjson;
 
-#ifndef SUBMISSION_MODE
+#ifndef DISABLE_VALIDATE
 struct AnswerValidator {
     map<pair<string, string>, pair<int, string>> expected_answer;
     
@@ -900,8 +956,8 @@ struct AnswerValidator {
         if (!is_get && !post_loaded) {
             expected_answer.clear();
             post_loaded = true;
-            load("/var/loadtest/full_answers/phase_2_post.answ");
-            load("/var/loadtest/full_answers/phase_3_get.answ");
+            load("/tmp/answers/phase_2_post.answ");
+            load("/tmp/answers/phase_3_get.answ");
             printf("Validator switched to phases 2-3\n");
         }
         
@@ -970,7 +1026,7 @@ void initialize_validator() {
     //validator.load("../data/answers/phase_2_post.answ");
     //validator.load("../data/answers/phase_3_get.answ");
     
-    validator.load("/var/loadtest/full_answers/phase_1_get.answ");
+    validator.load("/tmp/answers/phase_1_get.answ");
 }
 #endif
 
@@ -1036,6 +1092,24 @@ unordered_map<int, Location> location_by_id;
 unordered_map<int, Visit> visit_by_id;
 unordered_set<string> all_user_emails;
 
+vector<User> fast_users;
+vector<Location> fast_locations;
+vector<Visit> fast_visits;
+
+template<class T> void build_fast(unordered_map<int, T>& m, vector<T>& to) {
+    int max_id = 0;
+    for (auto& it: m)
+        max_id = max(max_id, it.first);
+    
+    to.clear();
+    to.resize(max_id + 1);
+    
+    for (auto& it: m)
+        to[it.first] = it.second;
+    
+    printf("fast built, %d elements -> %d ids\n", (int)m.size(), (int)to.size());
+}
+
 enum class Entity : char {
     USERS,
     LOCATIONS,
@@ -1074,6 +1148,10 @@ void reindex_database() {
     
     printf("Database is ready\n");
     fflush(stdout);
+    
+    build_fast(user_by_id, fast_users);
+    build_fast(visit_by_id, fast_visits);
+    build_fast(location_by_id, fast_locations);
 }
 
 void load_json_dump(char* mutable_buffer) {
@@ -1272,10 +1350,20 @@ struct ResponseBuilder {
         }
     }
     
+#if 0
     void append(const char* data, int length) {
         realloc_if_needed(length);
         memcpy(buffer_pos, data, length);
         buffer_pos += length;
+    }
+#endif
+    
+    void append(const char* data, int length) {
+        memcpy(buffer_pos, data, length);
+        buffer_pos += length;
+        /*while (length--) {
+            *buffer_pos++ = *data++;
+        }*/
     }
     
     void append_int(int x) {
@@ -1292,8 +1380,11 @@ struct ResponseBuilder {
     
     void write(int fd) {
         profiler.begin(WRITE_RESPONSE);
+        li t0 = get_ns_timestamp();
         ::write(fd, buffer_begin, buffer_pos - buffer_begin);
-        close(fd);
+        li t1 = get_ns_timestamp();
+        printf("write call taken %.3f mks\n", (t1 - t0) / 1000.0);
+        //close(fd);
         profiler.end(WRITE_RESPONSE);
     }
 };
@@ -1420,7 +1511,7 @@ struct RequestHandler {
 #define zero_offset_string header_200 header_connection_close header_host header_server "Content-Length:"
 #define HTTP_OK_PREFIX header_200 header_connection_close header_host header_server header_content_length_tbd header_rn
 
-#ifndef SUBMISSION_MODE
+#ifndef DISABLE_VALIDATE
 #define validate_json() \
         char* data_ptr = json.buffer_begin + sizeof HTTP_OK_PREFIX - 1; \
         validator.supply_data(data_ptr, json.buffer_pos - data_ptr)
@@ -1491,10 +1582,22 @@ struct RequestHandler {
                         return 400;
                 }
                 
+#if 0
+                int n = it_end - it;
+                if (n < 0) n = 0;
+                
+                for (int i = 0; i < n; i++) {
+                    char str[] = "{\"mark\":3,\"visited_at\":1403153768,\"place\":\"averageaverage\"},";
+                    for (int t = 0; t < sizeof(str); t += 4)
+                        json.append("xxxx", 4);
+                    //json.append(str, sizeof(str) - 1);
+                }
+#elif 1
+                li startb = get_ns_timestamp() - global_t_ready;
                 while (it < it_end) {
-                    Visit& visit = visit_by_id[it->id];
+                    Visit& visit = fast_visits[it->id];
                     it++;
-                    Location& location = location_by_id[visit.location_id];
+                    Location& location = fast_locations[visit.location_id];
                     
                     if (country_ptr_begin) {
                         if (country_ptr_end - country_ptr_begin != (long)location.country.length() || memcmp(country_ptr_begin, location.country.data(), location.country.length()))
@@ -1521,9 +1624,43 @@ struct RequestHandler {
                     json.append(location.place.data(), location.place.length());
                     append_str(json,"\"}");
                 }
+#else
+                while (it < it_end) {
+                    //Visit& visit = visit_by_id[it->id];
+                    it++;
+                    //Location& location = location_by_id[visit.location_id];
+                    
+                    if (country_ptr_begin) {
+                        //if (country_ptr_end - country_ptr_begin != (long)location.country.length() || memcmp(country_ptr_begin, location.country.data(), location.country.length()))
+                        //    continue;
+                    }
+                    
+                    if (to_distance != MAGIC_INTEGER) {
+                        //if (location.distance >= to_distance)
+                        //    continue;
+                    }
+                    
+                    if (n_visits) {
+                        append_str(json, ",{\"mark\":");
+                    }
+                    else {
+                        append_str(json, "{\"mark\":");
+                    }
+                    n_visits++;
+                    
+                    json.append_int(100500);
+                    append_str(json,",\"visited_at\":");
+                    json.append_int(100600);
+                    append_str(json,",\"place\":\"");
+                    json.append("averageaverage", 14);
+                    append_str(json,"\"}");
+                }
+#endif
                 
                 append_str(json, "]}");
                 
+                li endb = get_ns_timestamp() - global_t_ready;
+                printf("timings %.3f %.3f\n", startb / 1000.0, endb / 1000.0);
                 send_response();
                 return 200;
             }
@@ -1672,6 +1809,128 @@ struct RequestHandler {
         return 400;
     }
     
+    
+    
+    void performance_test(int mode) {
+        const int N_TRIES = 10;
+        li hash = 0;
+        
+        vector<int> ids;
+        for (auto it: user_by_id) {
+            ids.push_back(it.first);
+            if (ids.size() > 10000) break;
+        }
+        
+        //for (int id: ids)
+        //    if (id != 1)
+        //        user_by_id[id].visits = user_by_id[1].visits;
+        
+        li t0 = get_ns_timestamp();
+        srand(0);
+        for (int tries = 0; tries < N_TRIES; tries++) {
+            ResponseBuilder json;
+            
+            User& user = user_by_id[1];
+            
+            append_str(json, HTTP_OK_PREFIX "{\"visits\":[");
+            
+            auto it = user.visits.begin();
+            auto it_end = user.visits.end();
+            
+            // mode 0: 2410.195 mks/query, hash 0
+            // mode 1: 4687.358 mks/query, hash 63
+            // mode 2: 2835.726 mks/query, hash 71
+            
+            if (mode == 0) {
+#if 1
+                int n = it_end - it;
+                if (n < 0) n = 0;
+                
+                for (int i = 0; i < n; i++) {
+                    static char str[] = "{\"mark\":3,\"visited_at\":1403153768,\"place\":\"averageaverage\"},";
+                    for (int t = 0; t < sizeof(str); t += 4)
+                        json.append("xxxx", 4);
+                    //json.append(str, sizeof(str) - 1);
+                }
+#endif
+            }
+            else if (mode == 1) {
+                int n_visits = 0;
+                while (it < it_end) {
+                    Visit& visit = visit_by_id[it->id];
+                    it++;
+                    Location& location = location_by_id[visit.location_id];
+                    
+                    if (country_ptr_begin) {
+                        if (country_ptr_end - country_ptr_begin != (long)location.country.length() || memcmp(country_ptr_begin, location.country.data(), location.country.length()))
+                            continue;
+                    }
+                    
+                    if (to_distance != MAGIC_INTEGER) {
+                        if (location.distance >= to_distance)
+                            continue;
+                    }
+                    
+                    if (n_visits) {
+                        append_str(json, ",{\"mark\":");
+                    }
+                    else {
+                        append_str(json, "{\"mark\":");
+                    }
+                    n_visits++;
+                    
+                    json.append_int(visit.mark);
+                    append_str(json,",\"visited_at\":");
+                    json.append_int(visit.visited_at);
+                    append_str(json,",\"place\":\"");
+                    json.append(location.place.data(), location.place.length());
+                    append_str(json,"\"}");
+                }
+            }
+            else if (mode == 2) {
+                int n_visits = 0;
+                while (it < it_end) {
+                    //Visit& visit = visit_by_id[it->id];
+                    it++;
+                    //Location& location = location_by_id[visit.location_id];
+                    
+                    if (country_ptr_begin) {
+                        //if (country_ptr_end - country_ptr_begin != (long)location.country.length() || memcmp(country_ptr_begin, location.country.data(), location.country.length()))
+                        //    continue;
+                    }
+                    
+                    if (to_distance != MAGIC_INTEGER) {
+                        //if (location.distance >= to_distance)
+                        //    continue;
+                    }
+                    
+                    if (n_visits) {
+                        append_str(json, ",{\"mark\":");
+                    }
+                    else {
+                        append_str(json, "{\"mark\":");
+                    }
+                    n_visits++;
+                    
+                    json.append_int(100500);
+                    append_str(json,",\"visited_at\":");
+                    json.append_int(100600);
+                    append_str(json,",\"place\":\"");
+                    json.append("averageaverage", 14);
+                    append_str(json,"\"}");
+                }
+            }
+            append_str(json, "]}");
+            
+            for (auto x = json.buffer_begin; x < json.buffer_pos; x++)
+                hash ^= *x;
+        }
+        li t1 = get_ns_timestamp();
+        
+        printf("mode %d: %.3f mks/query, hash %lld\n", mode, (t1 - t0) / (double)N_TRIES / 1000.0, hash);
+    }
+    
+    
     int handle_post(int fd, const char* body) {
 #define header_content_length_four "Content-Length: 2\r\n"
 //#define header_content_type "Content-Type: application/json\r\n"
@@ -1682,8 +1941,8 @@ struct RequestHandler {
 #define successful_update() \
         profiler.begin(WRITE_RESPONSE); \
         write(fd, HTTP_OK_WITH_EMPTY_JSON_RESPONSE, sizeof(HTTP_OK_WITH_EMPTY_JSON_RESPONSE) - 1); \
-        close(fd); \
         profiler.end(WRITE_RESPONSE)
+        //close(fd);
         
         //successful_update();
         //return 200;
@@ -1960,6 +2219,12 @@ struct RequestHandler {
 #undef validate_json
 };
 
+void do_benchmark() {
+    RequestHandler handler;
+    for (int mode = 0; mode < 3; mode++)
+        handler.performance_test(mode);
+}
+
 int process_request_options(RequestHandler& handler, const char* path, const char* path_end) {
     // optional parameters
     if (path < path_end && *path == '?') {
@@ -2043,11 +2308,11 @@ int process_get_request_raw(int fd, const char* path, int path_length) {
 }
 
 int process_get_request(int fd, const char* path, int path_length) {
-#ifndef SUBMISSION_MODE
+#ifndef DISABLE_VALIDATE
     string path_backup(path, path + path_length);
 #endif
     int code = process_get_request_raw(fd, path, path_length);
-#ifndef SUBMISSION_MODE
+#ifndef DISABLE_VALIDATE
     validator.check_answer(true, path_backup.c_str(), path_length, code, 0, 0);
 #endif
     return code;
@@ -2088,7 +2353,7 @@ int process_post_request_raw(int fd, const char* path, int path_length, const ch
 
 int process_post_request(int fd, const char* path, int path_length, const char* body) {
     int code = process_post_request_raw(fd, path, path_length, body);
-#ifndef SUBMISSION_MODE
+#ifndef DISABLE_VALIDATE
     validator.check_answer(false, path, path_length, code, 0, 0);
 #endif
     return code;
