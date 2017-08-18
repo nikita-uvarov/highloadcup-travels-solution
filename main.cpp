@@ -164,7 +164,7 @@ struct Profiler {
     
     li last_flushreset = -1;
     
-    void maybe_flushreset(li ns_interval, Profiler* accumulator) {
+    void maybe_flushreset(li ns_interval, Profiler* accumulator, bool forced = false) {
         timespec now_ts;
         clock_gettime(CLOCK_MONOTONIC, &now_ts);
         li now = timespec_to_li(now_ts);
@@ -174,7 +174,7 @@ struct Profiler {
             return;
         }
         
-        if (now - last_flushreset >= ns_interval) {
+        if (now - last_flushreset >= ns_interval || forced) {
             last_flushreset = now;
             write_status();
             if (accumulator)
@@ -727,6 +727,9 @@ void start_poll_server() {
 #endif
 
 li global_t_ready;
+bool global_last_request_is_get = false;
+
+vector<input_request_handler> fd_to_queue;
 
 void start_epoll_server() {
     epoll_event event;
@@ -747,14 +750,25 @@ void start_epoll_server() {
 
     events = (epoll_event*)calloc(MAX_POLL_EVENTS, sizeof event);
     
-    unordered_map<int, input_request_handler*> fd_to_queue;
-    fd_to_queue.reserve(1000);
+    //unordered_map<int, input_request_handler*> fd_to_queue;
+    //fd_to_queue.reserve(1000);
+    fd_to_queue.resize(10000);
     
     printf("Started event loop (epoll)\n"); fflush(stdout);
     
+    bool last_request_is_get = false;
+    int max_fd = 0;
+    
     while (1) {
-        profiler.maybe_flushreset((li)1e9 * 5, &minute_accumulator_profiler);
-        minute_accumulator_profiler.maybe_flushreset((li)1e9 * 60, nullptr);
+        bool forced_flush = false;
+        if (global_last_request_is_get != last_request_is_get) {
+            printf("\nRequest type switch: '%s' -> '%s', max fd + 1: %d\n", (last_request_is_get ? "GET" : "POST"), (global_last_request_is_get ? "GET" : "POST"), max_fd);
+            last_request_is_get = global_last_request_is_get;
+            forced_flush = true;
+        }
+        
+        profiler.maybe_flushreset((li)1e9 * 5, &minute_accumulator_profiler, forced_flush);
+        minute_accumulator_profiler.maybe_flushreset((li)1e9 * 60, nullptr, forced_flush);
         
         int n = epoll_wait(efd, events, MAX_POLL_EVENTS, -1);
         for (int i = 0; i < n; i++) {
@@ -803,13 +817,18 @@ void start_epoll_server() {
                 li t_start = get_ns_timestamp();
                 int done = 0;
                 
-                input_request_handler*& q = fd_to_queue[events[i].data.fd];
+                max_fd = max(max_fd, events[i].data.fd + 1);
+                verify(events[i].data.fd >= 0 && events[i].data.fd < max_fd);
+                if (fd_to_queue.size() < max_fd)
+                    fd_to_queue.resize(max_fd);
+                
+                input_request_handler& q = fd_to_queue[events[i].data.fd];
                 //printf("read ready for socket %d\n", events[i].data.fd);
 
                 while (1) {
                     ssize_t count;
-                    const int READ_BUFFER_SIZE = 4096;
-                    static char buf[READ_BUFFER_SIZE * 2];
+                    const int READ_BUFFER_SIZE = 4096 * 2;
+                    static char buf[READ_BUFFER_SIZE];
 
                     profiler.begin(READ_CALL);
                     count = read(events[i].data.fd, buf, READ_BUFFER_SIZE);
@@ -831,10 +850,10 @@ void start_epoll_server() {
                         }
                     }
                     
-                    if (q == 0) {
+                    /*if (q == 0) {
                         q = new input_request_handler;
-                    }
-                    q->request_content += buf;
+                    }*/
+                    q.request_content += buf;
                 }
                 
                 if (done) {
@@ -851,19 +870,20 @@ void start_epoll_server() {
                 
                 //li t_ready = get_ns_timestamp();
                 global_t_ready = get_ns_timestamp();
-                int pret = q->parse(events[i].data.fd);
+                int pret = q.parse(events[i].data.fd);
                 verify(pret != -1);
 
                 if (pret > 0) {
                     //li t_end = get_ns_timestamp();
                     //printf("processed in %.3f mks, without read %.3f mks\n", (t_end - t_start) / 1000.0, (t_end - t_ready) / 1000.0);
                     
-                    q->request_content = "";
+                    q.request_content = "";
                     
                     if (was_really_closed) {
+                        /*
                         delete q;
                         fd_to_queue.erase(events[i].data.fd);
-                        was_really_closed = false;
+                        was_really_closed = false;*/
                     }
                     
 #if 0
@@ -1081,6 +1101,10 @@ struct User {
     char gender;
     timestamp birth_date;
     
+    string json_cache;
+    
+    void update_cache();
+    
     vector<DatedVisit> visits;
 };
 
@@ -1137,17 +1161,26 @@ const char* entity_to_string(Entity e) {
 }
 
 void reindex_database() {
+    int n_users = 0;
     for (int id = 0; id < (int)user_by_id.size(); id++)
-        if (user_by_id[id].id == id)
+        if (user_by_id[id].id == id) {
             user_by_id[id].visits.clear();
+            n_users++;
+        }
     
+    int n_locations = 0;
     for (int id = 0; id < (int)location_by_id.size(); id++)
-        if (location_by_id[id].id == id)
+        if (location_by_id[id].id == id) {
             location_by_id[id].visits.clear();
+            n_locations++;
+        }
     
+    int n_visits = 0;
     for (int id = 0; id < (int)visit_by_id.size(); id++) {
         if (visit_by_id[id].id != id)
             continue;
+        
+        n_visits++;
         
         Visit& visit = visit_by_id[id];
         
@@ -1169,7 +1202,7 @@ void reindex_database() {
     location_by_id.reserve(location_by_id.size() + RESERVE);
     user_by_id.reserve(user_by_id.size() + RESERVE);
     
-    printf("Database is ready\n");
+    printf("Database is ready (%d users, %d locations, %d visits)\n", n_users, n_locations, n_visits);
     fflush(stdout);
 }
 
@@ -1195,7 +1228,11 @@ void load_json_dump(char* mutable_buffer) {
     //printf("loading '%s', %d entries\n", entity_to_string(e), root.Size());
     
     // FIXME: add hints knowing real data size and/or estimations by file size
-    if (e == Entity::USERS) user_by_id.reserve(user_by_id.size() + root.Size());
+    if (e == Entity::USERS) {
+        user_by_id.reserve(user_by_id.size() + root.Size());
+        all_user_emails.max_load_factor(0.25);
+        all_user_emails.reserve(all_user_emails.size() + root.Size());
+    }
     if (e == Entity::LOCATIONS) location_by_id.reserve(location_by_id.size() + root.Size());
     if (e == Entity::VISITS) visit_by_id.reserve(visit_by_id.size() + root.Size());
     
@@ -1213,6 +1250,8 @@ void load_json_dump(char* mutable_buffer) {
             new_user.last_name = json_escape_string(o["last_name"].GetString());
             new_user.gender = o["gender"].GetString()[0];
             new_user.birth_date = o["birth_date"].GetInt();
+            new_user.update_cache();
+            all_user_emails.emplace(new_user.email);
             
             verify(new_user.gender == 'm' || new_user.gender == 'f');
         }
@@ -1445,6 +1484,27 @@ int utf8_string_length(const char* s, int character_length) {
 
 #define append_str(builder, str) builder.append(str, sizeof str - 1)
 
+void User::update_cache() {
+    json_cache = "";
+    
+    ResponseBuilder json;
+    append_str(json, "{\"id\":");
+    json.append_int(id);
+    append_str(json, ",\"email\":\"");
+    json.append(email.data(), email.length());
+    append_str(json, "\",\"first_name\":");
+    json.append(first_name.data(), first_name.length());
+    append_str(json, ",\"last_name\":");
+    json.append(last_name.data(), last_name.length());
+    append_str(json, ",\"gender\":\"");
+    json.append(&gender, 1);
+    append_str(json, "\",\"birth_date\":");
+    json.append_int(birth_date);
+    append_str(json, "}");
+    
+    json_cache = string(json.buffer_begin, json.buffer_pos);
+}
+
 struct RequestHandler {
     bool is_get;
     Entity entity;
@@ -1553,6 +1613,7 @@ struct RequestHandler {
                 
                 begin_response();
                 
+#if 0
                 append_str(json, HTTP_OK_PREFIX "{\"id\":");
                 json.append_int(user.id);
                 append_str(json, ",\"email\":\"");
@@ -1566,6 +1627,10 @@ struct RequestHandler {
                 append_str(json, "\",\"birth_date\":");
                 json.append_int(user.birth_date);
                 append_str(json, "}");
+#else
+                append_str(json, HTTP_OK_PREFIX);
+                json.append(user.json_cache.data(), user.json_cache.length());
+#endif
                 
                 send_response();
                 return 200;
@@ -1999,6 +2064,7 @@ struct RequestHandler {
                 new_user.last_name = json_escape_string(last_name);
                 new_user.gender = *gender;
                 new_user.birth_date = birth_date;
+                new_user.update_cache();
                 all_user_emails.emplace(email);
                 
                 return 200;
@@ -2021,6 +2087,8 @@ struct RequestHandler {
                 if (last_name) user->last_name = json_escape_string(last_name);
                 if (gender) user->gender = *gender;
                 if (birth_date != MAGIC_INTEGER) user->birth_date = birth_date;
+                
+                user->update_cache();
                 
                 return 200;
             }
@@ -2285,9 +2353,15 @@ int process_get_request_raw(int fd, const char* path, int path_length) {
     return code;
 }
 
+#if 0
 const li LONG_REQUEST_NS = 250 * (li)1000; // 500 mks is long
+#else
+const li LONG_REQUEST_NS = 400 * (li)1000;
+#endif
 
 int process_get_request(int fd, const char* path, int path_length) {
+    global_last_request_is_get = true;
+    
 #ifndef DISABLE_VALIDATE
     string path_backup(path, path + path_length);
 #endif
@@ -2337,6 +2411,8 @@ int process_post_request_raw(int fd, const char* path, int path_length, const ch
 }
 
 int process_post_request(int fd, const char* path, int path_length, const char* body) {
+    global_last_request_is_get = false;
+    
     int code = process_post_request_raw(fd, path, path_length, body);
     li t_answered = get_ns_timestamp();
     if (t_answered - global_t_ready > LONG_REQUEST_NS) {
