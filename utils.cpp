@@ -1,6 +1,6 @@
 /* Common */
 
-#define verify(cond) if (!(cond)) { fprintf(stderr, "Verification failed: '" #cond "' on line %d\n", __LINE__); perror("perror"); fflush(stderr); abort(); }
+#define verify(cond) if (!(cond)) { fprintf(stderr, "Verification failed: '" #cond "' on line %d\n", __LINE__); perror("perror"); fflush(stderr); fflush(stdout); sleep(2); abort(); }
 
 #ifndef SUBMISSION_MODE
 #define check(cond) if (!(cond)) { fprintf(stderr, "Verification failed: '" #cond "' on line %d\n", __LINE__); perror("perror"); fflush(stderr); abort(); }
@@ -150,6 +150,9 @@ void load_initial_data() {
         int ec = system(unzip_cmd.c_str());
         verify(ec == 0);
         
+        li t_unzip = get_ns_timestamp();
+        printf("Unzip done in %.3f seconds\n", (t_unzip - t_begin) / (double)1e9);
+        
         string find_cmd = "find data -name '*' >db_files.txt";
         ec = system(find_cmd.c_str());
         verify(ec == 0);
@@ -172,7 +175,8 @@ void load_initial_data() {
                 load_options_from_file(db_file_name, true);
             }
         }
-        printf("files %s\n", concat.c_str()); fflush(stdout);
+        li t_read = get_ns_timestamp();
+        printf("files %s, read in %.3f seconds\n", concat.c_str(), (t_read - t_unzip) / (double)1e9); fflush(stdout);
         
         verify(n_files > 0);
     }

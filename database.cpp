@@ -71,7 +71,7 @@ vector<Location> location_by_id;
 vector<Visit> visit_by_id;
 //unordered_set<string> all_user_emails;
 
-mutex write_mutex;
+//std::mutex write_mutex;
 
 template<class T> void maybe_resize(vector<T>& by_id, int id) {
     if (id >= (int)by_id.size())
@@ -639,9 +639,6 @@ struct RequestHandler {
         return 400;
     }
     
-    void performance_test(int mode) {
-    }
-    
     
     int handle_post(int fd, const char* body) {
 #define header_content_length_four "Content-Length: 2\r\n"
@@ -709,8 +706,8 @@ struct RequestHandler {
                     continue; \
                 }}
                 
-#define lock_write_access() \
-    unique_lock<std::mutex> write_lock(write_mutex)
+#define lock_write_access()
+    //unique_lock<std::mutex> write_lock(write_mutex)
 
         if (entity == Entity::USERS) {
             begin_parsing_update(User, user);
@@ -956,9 +953,5 @@ struct RequestHandler {
 };
 
 void do_benchmark() {
-#if 0
-    RequestHandler handler;
-    for (int mode = 0; mode < 3; mode++)
-        handler.performance_test(mode);
-#endif
+    
 }

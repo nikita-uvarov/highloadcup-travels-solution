@@ -8,7 +8,7 @@ void write_only_header_answer(int fd, int code) {
     global_t_ready_write = get_ns_timestamp();
     
     if (code == 200) {
-#define response_200 header_200 header_content_length_zero header_connection_close header_server header_host header_rn
+#define response_200 header_200 header_content_length_zero header_connection_close_real header_server header_host header_rn
         write(fd, response_200, sizeof response_200 - 1);
 #undef response_200
     }
@@ -38,7 +38,8 @@ int process_post_request(int fd, const char* path, int path_length, const char* 
 void request_completed(bool is_get, const char* path, int path_length, int code);
 
 struct http_input_request_handler {
-    string request_content;
+    char* request_content;
+    int request_length;
     
     int parse(int fd) {
         profile_begin(PARSE_HEADERS);
@@ -50,7 +51,7 @@ struct http_input_request_handler {
         const char* path;
         const char* method;
         int minor_version;
-        int pret = phr_parse_request(request_content.data(), request_content.length(), &method, &method_len, &path, &path_len,
+        int pret = phr_parse_request(request_content, request_length, &method, &method_len, &path, &path_len,
                                 &minor_version, headers, &num_headers, prevbuflen);
         
 #if 0
@@ -69,7 +70,7 @@ struct http_input_request_handler {
         if (pret < 0) {
             profile_end(PARSE_HEADERS);
             if (pret == -1) {
-                printf("Request failed to parse headers:\n'%s'\n", request_content.c_str());
+                printf("Request failed to parse headers:\n'%.*s'\n", request_length, request_content);
                 fflush(stdout);
             }
             
@@ -107,7 +108,7 @@ struct http_input_request_handler {
                 
             check(content_length >= 0);
             
-            int have_length = request_content.length() - pret;
+            int have_length = request_length - pret;
             if (have_length < content_length) {
                 printf("warning -- large request (%d have, %d need)\n", have_length, content_length); fflush(stdout);
                 return -2;
@@ -120,7 +121,7 @@ struct http_input_request_handler {
             //write_only_header_answer(fd, 400);
             //return pret;
             
-            int code = process_post_request(fd, path, path_len, request_content.c_str() + pret);
+            int code = process_post_request(fd, path, path_len, request_content + pret);
             if (code != 200)
                 write_only_header_answer(fd, code);
             request_completed(false, path, path_len, code);

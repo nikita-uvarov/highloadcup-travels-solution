@@ -9,6 +9,10 @@
 #include <sys/epoll.h>
 #include <errno.h>
 #include <arpa/inet.h>
+#include <sched.h>
+#include <sys/syscall.h>
+
+#define gettid() syscall(SYS_gettid)
 
 #include "picohttpparser/picohttpparser.h"
 
@@ -28,6 +32,7 @@ using namespace std;
 
 #define DISABLE_VALIDATE
 #define DISABLE_PROFILING
+//#define DISABLE_AFFINITY
 
 #include "utils.cpp"
 #include "profiler.cpp"
