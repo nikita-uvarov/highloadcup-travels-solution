@@ -141,7 +141,8 @@ void reserve_process_memory(size_t size) {
 void tune_realtime_params() {
     configure_malloc_behavior();
     show_new_pagefault_count("Initial count");
-    reserve_process_memory((size_t)(1.4 * 1024 * 1024 * 1024));
+    reserve_process_memory(1.4 * 1024 * 1024 * (size_t)1024 + NEED_NF_MEMORY);
+    initialize_nf();
 }
 
 void add_socket_to_epoll_queue(int fd, bool mod) {
@@ -407,7 +408,7 @@ void poller_thread(int thread_index, int affinity_mask) {
     
     // 6200 mks with simple read write
     
-    li last_print = get_ns_timestamp();
+    //li last_print = get_ns_timestamp();
     while (true) {
 #if 0
         if (get_ns_timestamp() > last_print + 1e9) {

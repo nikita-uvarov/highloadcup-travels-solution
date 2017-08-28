@@ -142,7 +142,7 @@ int get_compression_profit(string& s) {
 #endif
 
 void reindex_database() {
-    int profit_email = 0, profit_first_name = 0, profit_last_name = 0, profit_place = 0, profit_country = 0, profit_country_unesc = 0, profit_city = 0;
+    //int profit_email = 0, profit_first_name = 0, profit_last_name = 0, profit_place = 0, profit_country = 0, profit_country_unesc = 0, profit_city = 0;
     
     int n_users = 0;
     for (int id = 0; id < (int)user_by_id.size(); id++)

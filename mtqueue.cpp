@@ -11,8 +11,8 @@ volatile int queue_first, queue_last;
 const int CIRCULAR_SIZE = 4096;
 pending_write pending_writes[CIRCULAR_SIZE];
 
-void imm_write_call(int fd, char* buffer, int size) {
-    pending_writes[queue_last] = make_tuple(fd, buffer, size);
+void imm_write_call(int fd, const char* buffer, int size) {
+    pending_writes[queue_last] = make_tuple(fd, (char*)buffer, size);
     int new_value = queue_last >= CIRCULAR_SIZE - 1 ? 0 : queue_last + 1;
     
     if (new_value == queue_first) {

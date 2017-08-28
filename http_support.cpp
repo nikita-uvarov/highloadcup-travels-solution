@@ -7,7 +7,7 @@ void write_only_header_answer(int fd, int code) {
     scope_profile(WRITE_RESPONSE);
     global_t_ready_write = get_ns_timestamp();
     
-    int res = 0, expected = 0;
+    //int res = 0, expected = 0;
     if (code == 200) {
 #define response_200 header_200 header_content_length_zero header_connection_close_real header_server header_host header_rn
         imm_write_call(fd, response_200, sizeof response_200 - 1);
