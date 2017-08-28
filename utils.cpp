@@ -10,6 +10,12 @@
 
 using li = long long;
 
+#ifdef MULTIPLE_POLLERS
+#define poller_local thread_local
+#else
+#define poller_local
+#endif
+
 /* Decoding different things */
 
 string json_escape_string(const string& str) {
@@ -235,6 +241,22 @@ void inspect_server_parameters() {
         li t_end = get_ns_timestamp();
         printf("clock_gettime cost (ns): %.5f, hash %lld\n", (t_end - t_begin) / (double)N_TEST_GETTIMES, hash); fflush(stdout);
     }
+}
+
+/* Affinity */
+
+union CpuSet {
+    cpu_set_t as_set;
+    int as_int[sizeof(cpu_set_t) / sizeof(int)];
+    unsigned char as_char[sizeof(cpu_set_t)];
+};
+
+int get_affinity_mask() {
+    CpuSet cpu_mask = {};
+    
+    verify(sched_getaffinity(0, sizeof(cpu_mask.as_set), &cpu_mask.as_set) == 0);
+    
+    return cpu_mask.as_int[0];
 }
 
 void set_thread_affinity(int affinity_mask, bool is_poller) {

@@ -36,12 +36,6 @@ const int MAX_FDS = 10000;
 const int READ_BUFFER_SIZE = 4096 * 2;
 constexpr bool ACTIVE_WAIT = true;
 
-union CpuSet {
-    cpu_set_t as_set;
-    int as_int[sizeof(cpu_set_t) / sizeof(int)];
-    unsigned char as_char[sizeof(cpu_set_t)];
-};
-
 static int create_and_bind(int port) {
     int sfd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, IPPROTO_IP);
     verify(sfd != -1);
@@ -81,16 +75,6 @@ struct EpollServer {
 EpollServer epoll_server;
 
 void poller_thread(int thread_index, int affinity_mask);
-
-#ifndef DISABLE_AFFINITY
-int get_affinity_mask() {
-    CpuSet cpu_mask = {};
-    
-    verify(sched_getaffinity(0, sizeof(cpu_mask.as_set), &cpu_mask.as_set) == 0);
-    
-    return cpu_mask.as_int[0];
-}
-#endif
 
 /* Memory fiddling */
 
@@ -165,7 +149,10 @@ void add_socket_to_epoll_queue(int fd, bool mod) {
     
     epoll_event event = {};
     event.data.fd = fd;
-    event.events = EPOLLIN | EPOLLET | EPOLLRDHUP;// | EPOLLONESHOT;// | EPOLLEXCLUSIVE;
+    event.events = EPOLLIN | EPOLLRDHUP;// | EPOLLONESHOT;// | EPOLLEXCLUSIVE;
+#ifndef DISABLE_EPOLLET
+    event.events |= EPOLLET;
+#endif
     int ec = epoll_ctl(epoll_server.efd, mod ? EPOLL_CTL_MOD : EPOLL_CTL_ADD, fd, &event);
     if (ec == -1)
         perror("epoll_ctl");
@@ -232,21 +219,18 @@ void start_epoll_server() {
     printf("\n"); fflush(stdout);
 #endif
     
-    //if (NUM_THREADS > 1) {
-        vector<thread> threads(NUM_POLLER_THREADS + NUM_CONSUMER_THREADS);
+    vector<thread> threads(NUM_POLLER_THREADS + NUM_CONSUMER_THREADS - 1);
+    
+    for (int i = 0; i < (int)threads.size(); i++)
+        if (i < NUM_CONSUMER_THREADS)
+            threads[i] = thread(consumer_thread, i, affinity_mask[i]);
+        else
+            threads[i] = thread(poller_thread, i, affinity_mask[i]);
         
-        for (int i = 0; i < (int)threads.size(); i++)
-            if (i < NUM_POLLER_THREADS)
-                threads[i] = thread(poller_thread, i, affinity_mask[i]);
-            else
-                threads[i] = thread(consumer_thread, i, affinity_mask[i]);
-        
-        for (int i = 0; i < (int)threads.size(); i++)
-            threads[i].join();
-    /*}
-    else {
-        poller_thread(0, affinity_mask[0]);
-    }*/
+    poller_thread(NUM_POLLER_THREADS + NUM_CONSUMER_THREADS - 1, affinity_mask[NUM_POLLER_THREADS + NUM_CONSUMER_THREADS - 1]);
+            
+    for (int i = 0; i < (int)threads.size(); i++)
+        threads[i].join();
 }
 
 #if 0
@@ -258,8 +242,12 @@ thread_local bool all_reads_equal = false;
     
 //vector<int> read_fds;
 
+#ifndef DISABLE_EPOLLET
 const int EAGAIN_BUFFER_SIZE = 128;
-static thread_local char read_buf[READ_BUFFER_SIZE], eagain_buf[EAGAIN_BUFFER_SIZE];
+poller_local char eagain_buf[EAGAIN_BUFFER_SIZE];
+#endif
+
+poller_local char read_buf[READ_BUFFER_SIZE];
 
 #if 0
 const int TRY_READS = 5;
@@ -293,6 +281,7 @@ void try_read_from(int fd, bool predict = false) {
         return;
     }
     
+#ifndef DISABLE_EPOLLET
     int n_reads = 0, sum_reads = 0;
     while (true) {
         int can = read(fd, eagain_buf, EAGAIN_BUFFER_SIZE);
@@ -313,13 +302,16 @@ void try_read_from(int fd, bool predict = false) {
         sum_reads += can;
         n_reads++;
     }
+#endif
     profile_end(READ_CALL);
     
+#ifndef DISABLE_EPOLLET
     add_socket_to_epoll_queue(fd, true);
     
     if (n_reads > 0) {
         printf("Strange, expected EAGAIN but got %d reads for %d bytes total\n", n_reads, sum_reads);
     }
+#endif
     
     if (count <= 0) return;
     read_buf[count] = 0;

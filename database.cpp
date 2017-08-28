@@ -17,6 +17,8 @@ const timestamp MIN_ALLOWED_VISIT_DATE = numeric_limits<int>::min();
 const timestamp MAX_ALLOWED_VISIT_DATE = numeric_limits<int>::max();
 #endif
 
+// string - 8, User - 72, Location - 72, Visit - 20
+
 struct DatedVisit {
     int id;
     timestamp visited_at;
@@ -41,7 +43,6 @@ struct User {
     timestamp birth_date;
     
     string json_cache;
-    
     void update_cache();
     
     vector<DatedVisit> visits;
@@ -58,6 +59,8 @@ struct Location {
     vector<DatedVisit> visits;
 };
 
+// aim at 169 s.
+
 struct Visit {
     int id = -1;
     int location_id;
@@ -71,7 +74,9 @@ vector<Location> location_by_id;
 vector<Visit> visit_by_id;
 //unordered_set<string> all_user_emails;
 
+#ifndef DISABLE_DATABASE_WRITE_LOCKS
 std::mutex write_mutex;
+#endif
 
 template<class T> void maybe_resize(vector<T>& by_id, int id) {
     if (id >= (int)by_id.size())
@@ -122,11 +127,34 @@ void initialize_age_cache() {
     }
 }
 
+#if 0
+set<string> all_strings;
+
+int get_compression_profit(string& s) {
+    if (all_strings.count(s)) {
+        return s.length();
+    }
+    else {
+        all_strings.insert(s);
+        return 0;
+    }
+}
+#endif
+
 void reindex_database() {
+    int profit_email = 0, profit_first_name = 0, profit_last_name = 0, profit_place = 0, profit_country = 0, profit_country_unesc = 0, profit_city = 0;
+    
     int n_users = 0;
     for (int id = 0; id < (int)user_by_id.size(); id++)
         if (user_by_id[id].id == id) {
             user_by_id[id].visits.clear();
+            
+#if 0
+            profit_email += get_compression_profit(user_by_id[id].email);
+            profit_first_name += get_compression_profit(user_by_id[id].first_name);
+            profit_last_name += get_compression_profit(user_by_id[id].last_name);
+#endif
+            
             n_users++;
         }
     
@@ -135,7 +163,26 @@ void reindex_database() {
         if (location_by_id[id].id == id) {
             location_by_id[id].visits.clear();
             n_locations++;
+            
+#if 0
+            profit_place += get_compression_profit(location_by_id[id].place);
+            profit_country += get_compression_profit(location_by_id[id].country);
+            profit_country_unesc += get_compression_profit(location_by_id[id].country_unescaped);
+            profit_city += get_compression_profit(location_by_id[id].city);
+#endif
         }
+        
+#if 0
+    // 78 Mb total
+    printf("String compression profit: email - %s, first name - %s, last name - %s, place - %s, country - %s, country unesc - %s, city - %s\n",
+           memory_human_readable(profit_email).c_str(),
+           memory_human_readable(profit_first_name).c_str(),
+           memory_human_readable(profit_last_name).c_str(),
+           memory_human_readable(profit_place).c_str(),
+           memory_human_readable(profit_country).c_str(),
+           memory_human_readable(profit_country_unesc).c_str(),
+           memory_human_readable(profit_city).c_str());
+#endif
     
     int n_visits = 0;
     for (int id = 0; id < (int)visit_by_id.size(); id++) {
@@ -159,7 +206,7 @@ void reindex_database() {
         if (location_by_id[id].id == id)
             sort(all(location_by_id[id].visits));
 
-    const int RESERVE = 4000;
+    const int RESERVE = 12000;
     visit_by_id.reserve(visit_by_id.size() + RESERVE);
     location_by_id.reserve(location_by_id.size() + RESERVE);
     user_by_id.reserve(user_by_id.size() + RESERVE);

@@ -2,18 +2,21 @@
 
 /* Mutli threaded producer-consumer queue */
 
-#if 0
+using pending_write = tuple<int, char*, int>;
+
+#ifndef DISABLE_SPINLOCKS
 volatile int queue_first, queue_last;
 //mutex queue_pop_mutex;
 
-const int CIRCULAR_SIZE = 20000;
-tuple<int, char*, int> pending_writes[CIRCULAR_SIZE];
+const int CIRCULAR_SIZE = 4096;
+pending_write pending_writes[CIRCULAR_SIZE];
 
 void imm_write_call(int fd, char* buffer, int size) {
     pending_writes[queue_last] = make_tuple(fd, buffer, size);
-    int new_value = (queue_last + 1) % CIRCULAR_SIZE;
+    int new_value = queue_last >= CIRCULAR_SIZE - 1 ? 0 : queue_last + 1;
+    
     if (new_value == queue_first) {
-        printf("Circular buffer overrun!\n");
+        printf("Circular buffer overrun!\n"); fflush(stdout);
     }
     queue_last = new_value;
 }
@@ -31,16 +34,14 @@ public:
 
 SpinLock queue_pop_lock;
 
-void consumer_thread(int thread_index) {
+void consumer_thread(int thread_index, int affinity_mask) {
     global_thread_index = thread_index;
-    
-    printf("Started consumer thread index %d\n", thread_index); fflush(stdout);
+    set_thread_affinity(affinity_mask, false);
     
     while (true) {
         if (queue_first == queue_last) continue;
         
         {
-            //unique_lock<mutex> lock(queue_pop_mutex);
             queue_pop_lock.lock();
             
             if (queue_first == queue_last) {
@@ -48,22 +49,16 @@ void consumer_thread(int thread_index) {
                 continue;
             }
             
-            auto query = pending_writes[queue_first];
-            int new_value = (queue_first + 1) % CIRCULAR_SIZE;
+            pending_write query = pending_writes[queue_first];
+            int new_value = queue_first >= CIRCULAR_SIZE - 1 ? 0 : queue_first + 1;
             queue_first = new_value;
             queue_pop_lock.unlock();
-            //lock.unlock();
-            
-            //printf("%d writes\n", thread_index); fflush(stdout);
         
             write(get<0>(query), get<1>(query), get<2>(query));
         }
     }
 }
-#endif
-
-using pending_write = tuple<int, char*, int>;
-
+#else
 moodycamel::BlockingConcurrentQueue<pending_write> write_queue(4000);
 moodycamel::ProducerToken* producer_token;
 
@@ -89,3 +84,4 @@ void consumer_thread(int thread_index, int affinity_mask) {
         write(get<0>(query), get<1>(query), get<2>(query));
     }
 }
+#endif

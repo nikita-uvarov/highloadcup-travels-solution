@@ -36,8 +36,11 @@ using namespace std;
 
 #define DISABLE_VALIDATE
 #define DISABLE_PROFILING
-#define DISABLE_AFFINITY
+//#define DISABLE_AFFINITY
 #define DISABLE_DATABASE_WRITE_LOCKS
+#define DISABLE_EPOLLET
+//#define DISABLE_SPINLOCKS
+//#define MULTIPLE_POLLERS
 
 #include "utils.cpp"
 #include "profiler.cpp"
@@ -49,6 +52,9 @@ using namespace std;
 #include "network.cpp"
 
 int main() {
+    //printf("string - %d, User - %d, Location - %d, Visit - %d\n", sizeof(string), sizeof(User), sizeof(Location), sizeof(Visit));
+    //return 0;
+    
     LONG_REQUEST_NS = 0;
     LONG_REQUEST_NS = 2e6;
     

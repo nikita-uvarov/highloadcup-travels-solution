@@ -1,8 +1,8 @@
 /* custom itoa... dont' know why */
 
 const int MAX_INTEGER_SIZE = 30;
-thread_local char itoa_buffer[MAX_INTEGER_SIZE];
-thread_local int itoa_length;
+poller_local char itoa_buffer[MAX_INTEGER_SIZE];
+poller_local int itoa_length;
 
 void itoa_unsafe(int x) {
     itoa_length = 0;
@@ -30,14 +30,14 @@ void itoa_unsafe(int x) {
 
 /* Response builder */
 
-thread_local li global_t_ready_write;
+poller_local li global_t_ready_write;
 
 const int N_RESPONSE_BUFFERS = 2048;
 const int MAX_RESPONSE_SIZE = 4096 * 2;
-char response_buffer[N_RESPONSE_BUFFERS][MAX_RESPONSE_SIZE];
+poller_local char response_buffer[N_RESPONSE_BUFFERS][MAX_RESPONSE_SIZE];
 
-thread_local int n_allocs = 0;
-thread_local int fd_index;
+poller_local int n_allocs = 0;
+poller_local int fd_index;
 
 struct ResponseBuilder {
     char* buffer_begin;
