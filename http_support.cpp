@@ -7,15 +7,18 @@ void write_only_header_answer(int fd, int code) {
     scope_profile(WRITE_RESPONSE);
     global_t_ready_write = get_ns_timestamp();
     
+    int res = 0, expected = 0;
     if (code == 200) {
 #define response_200 header_200 header_content_length_zero header_connection_close_real header_server header_host header_rn
-        write(fd, response_200, sizeof response_200 - 1);
+        res = write(fd, response_200, sizeof response_200 - 1);
+        expected = sizeof response_200 - 1;
 #undef response_200
     }
     
     if (code == 400) {
 #define response_400 header_400 header_content_length_zero header_connection_close_real header_server header_host header_rn
-        write(fd, response_400, sizeof response_400 - 1);
+        res = write(fd, response_400, sizeof response_400 - 1);
+        expected = sizeof response_400 - 1;
         //close(fd);
         //was_really_closed = true;
 #undef response_400
@@ -23,12 +26,16 @@ void write_only_header_answer(int fd, int code) {
     
     if (code == 404) {
 #define response_404 header_404 header_content_length_zero header_connection_close_real header_server header_host header_rn
-        write(fd, response_404, sizeof response_404 - 1);
+        res = write(fd, response_404, sizeof response_404 - 1);
+        expected = sizeof response_404 - 1;
         //close(fd);
         //was_really_closed = true;
 #undef response_404
     }
-    
+    if (res != expected) {
+        printf("write call returned %d but %d was expected\n", res, expected);
+        fflush(stdout);
+    }
 }
 
 /* Initial request bufferization & parsing */
@@ -135,7 +142,8 @@ struct http_input_request_handler {
 };
 
 struct instant_answer_request_handler {
-    string request_content;
+    char* request_content;
+    int request_length;
     
     int parse(int fd) {
         write_only_header_answer(fd, 200);
@@ -197,17 +205,34 @@ li LONG_REQUEST_NS = 250 * (li)1000; // 500 mks is long
 li LONG_REQUEST_NS = 400 * (li)1000;
 #endif
 
+thread_local int messages_limit = 200;
+
+thread_local li total_reads, total_logic, total_writes;
+
 void request_completed(bool is_get, const char* path, int path_length, int code) {
     global_last_request_is_get = is_get;
     li t_answered = get_ns_timestamp();
+    total_reads += global_t_ready - global_t_polled;
+    total_logic += global_t_ready_write - global_t_ready;
+    total_writes += t_answered - global_t_ready_write;
+    
     if (t_answered - global_t_ready > LONG_REQUEST_NS) {
-        printf("[%d] long %s %.*s (%d): %.3f mks pure, %.3f mks total (%.3f read, %.3f write)\n",
-               global_thread_index,
-               is_get ? "GET" : "POST", path_length, path, code,
-               (global_t_ready_write - global_t_ready) / 1000.0,
-               (t_answered - global_t_polled) / 1000.0,
-               (global_t_ready - global_t_polled) / 1000.0,
-               (t_answered - global_t_ready_write) / 1000.0);
+        if (messages_limit > 0) {
+            messages_limit--;
+            printf("[%d] long %s %.*s (%d): %.3f mks pure, %.3f mks total (%.3f read, %.3f write)\n",
+                global_thread_index,
+                is_get ? "GET" : "POST", path_length, path, code,
+                (global_t_ready_write - global_t_ready) / 1000.0,
+                (t_answered - global_t_polled) / 1000.0,
+                (global_t_ready - global_t_polled) / 1000.0,
+                (t_answered - global_t_ready_write) / 1000.0);
+            fflush(stdout);
+        }
+        else if (messages_limit == 0) {
+            printf("message limit exceeded for this thread\n");
+            fflush(stdout);
+            messages_limit = -1;
+        }
     }
     max_request_ns = max(max_request_ns, t_answered - global_t_ready);
 }

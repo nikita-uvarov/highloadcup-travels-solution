@@ -2,6 +2,9 @@
 
 #include <sys/types.h>
 #include <sys/socket.h>
+#include <sys/time.h>
+#include <sys/resource.h>
+#include <sys/mman.h>
 #include <netinet/tcp.h>
 #include <netdb.h>
 #include <unistd.h>
@@ -11,6 +14,7 @@
 #include <arpa/inet.h>
 #include <sched.h>
 #include <sys/syscall.h>
+#include <malloc.h>
 
 #define gettid() syscall(SYS_gettid)
 
@@ -32,7 +36,7 @@ using namespace std;
 
 #define DISABLE_VALIDATE
 #define DISABLE_PROFILING
-//#define DISABLE_AFFINITY
+#define DISABLE_AFFINITY
 
 #include "utils.cpp"
 #include "profiler.cpp"
@@ -44,13 +48,16 @@ using namespace std;
 
 int main() {
     LONG_REQUEST_NS = 0;
-    LONG_REQUEST_NS = 1e9;
+    LONG_REQUEST_NS = 2e6;
+    
+    tune_realtime_params();
     
     inspect_server_parameters();
 #ifndef DISABLE_VALIDATE
     initialize_validator();
 #endif
     load_initial_data();
+    initialize_age_cache();
     
     do_benchmark();
     

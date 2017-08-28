@@ -132,6 +132,30 @@ void load_options_from_file(string file_name, bool must_exist) {
     printf("Options loaded from '%s': timestamp %d, is rated: %s\n", file_name.c_str(), current_timestamp, is_rated_run ? "true" : "false"); fflush(stdout);
 }
 
+string memory_human_readable(unsigned int bytes) {
+    if (bytes < 1024) return to_string(bytes) + " bytes";
+    
+    char buf[256];
+    if (bytes < 1024 * 1024)
+        sprintf(buf, "%.1f KiB", bytes / (double)1024);
+    else if (bytes < 1024 * 1024 * 1024)
+        sprintf(buf, "%.1f MiB", bytes / (double)(1024 * 1024));
+    else
+        sprintf(buf, "%.2f GiB", bytes / (1024 * (double)1024 * 1024));
+        
+    return string(buf);
+}
+
+void print_memory_stats() {
+    struct mallinfo info = mallinfo();
+    printf("Memory stats: occupied %s, arena %s, preallocated free %s, keepcost %s\n",
+        memory_human_readable(info.uordblks).c_str(),
+        memory_human_readable(info.arena).c_str(),
+        memory_human_readable(info.fordblks).c_str(),
+        memory_human_readable(info.keepcost).c_str()
+    );
+}
+
 void load_initial_data() {
     current_timestamp = time(0);
     li t_begin = get_ns_timestamp();
@@ -157,26 +181,30 @@ void load_initial_data() {
         ec = system(find_cmd.c_str());
         verify(ec == 0);
         
-        ifstream db_files("db_files.txt");
-        verify(db_files);
-        string db_file_name = "";
         int n_files = 0;
-        
-        string concat;
-        while (getline(db_files, db_file_name) && db_file_name.length() > 0) {
-            if (!concat.empty()) concat += " ";
-            concat += db_file_name;
+        {
+            ifstream db_files("db_files.txt");
+            verify(db_files);
+            string db_file_name = "";
             
-            n_files++;
-            if (string_ends_with(db_file_name, ".json")) {
-                load_json_dump_from_file(db_file_name.c_str());
-            }
-            else if (string_ends_with(db_file_name, ".txt")) {
-                load_options_from_file(db_file_name, true);
+            while (getline(db_files, db_file_name) && db_file_name.length() > 0) {
+                n_files++;
+                if (string_ends_with(db_file_name, ".json")) {
+                    load_json_dump_from_file(db_file_name.c_str());
+                }
+                else if (string_ends_with(db_file_name, ".txt")) {
+                    load_options_from_file(db_file_name, true);
+                }
             }
         }
+        
         li t_read = get_ns_timestamp();
-        printf("files %s, read in %.3f seconds\n", concat.c_str(), (t_read - t_unzip) / (double)1e9); fflush(stdout);
+        printf("%d files, read in %.3f seconds\n", n_files, (t_read - t_unzip) / (double)1e9); fflush(stdout);
+        
+        ec = system("rm -r data db_files.txt");
+        verify(ec == 0);
+        
+        printf("erased intermediate directory succesfully\n");
         
         verify(n_files > 0);
     }
@@ -185,6 +213,8 @@ void load_initial_data() {
     reindex_database();
     li t_end = get_ns_timestamp();
     printf("Initial data loaded in %.3f seconds\n", (t_end - t_begin) / (double)1e9); fflush(stdout);
+    
+    print_memory_stats();
 }
 
 void inspect_server_parameters() {

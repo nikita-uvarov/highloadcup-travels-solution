@@ -71,7 +71,7 @@ vector<Location> location_by_id;
 vector<Visit> visit_by_id;
 //unordered_set<string> all_user_emails;
 
-//std::mutex write_mutex;
+std::mutex write_mutex;
 
 template<class T> void maybe_resize(vector<T>& by_id, int id) {
     if (id >= (int)by_id.size())
@@ -99,6 +99,27 @@ const char* entity_to_string(Entity e) {
     if (e == Entity::VISITS) return "visits";
     if (e == Entity::INVALID_PATH) return "invalid path";
     return "unknown";
+}
+
+const int MAX_ALLOWED_AGE = 300;
+time_t age_filter_cache[MAX_ALLOWED_AGE + 1];
+
+void initialize_age_cache() {
+    time_t now = {};
+    tm time_struct = {};
+    now = current_timestamp;
+    gmtime_r(&now, &time_struct);
+    
+    for (int age = 0; age <= MAX_ALLOWED_AGE; age++) {
+        int orig_year = time_struct.tm_year;
+        
+        time_struct.tm_year -= age;
+        time_struct.tm_year = max(time_struct.tm_year, 2);
+        //printf("need %d\n", time_struct.tm_year);
+        age_filter_cache[age] = mktime(&time_struct);
+        
+        time_struct.tm_year = orig_year;
+    }
 }
 
 void reindex_database() {
@@ -538,34 +559,39 @@ struct RequestHandler {
                 if (to_date != MAGIC_TIMESTAMP)
                     it_end = lower_bound(all(location.visits), DatedVisit{ -1, to_date });
                 
-                // timestamp jerk
-                
-                time_t now = {};
-                tm time_struct = {};
-                
                 bool filter_age = false;
                 if (from_age != MAGIC_INTEGER || to_age != MAGIC_INTEGER) {
-                    //now = time(0);
-                    now = current_timestamp;
-                    gmtime_r(&now, &time_struct);
                     filter_age = true;
                 }
                 
                 timestamp from_filter = numeric_limits<int>::min(), to_filter = numeric_limits<int>::max();
                 
                 if (from_age != MAGIC_INTEGER) {
+                    from_age = max(from_age, 0);
+                    from_age = min(from_age, MAX_ALLOWED_AGE);
+                    
+                    to_filter = min((time_t)to_filter, age_filter_cache[from_age] - 1);
+                    
+#if 0
                     int orig_year = time_struct.tm_year;
                     time_struct.tm_year -= from_age;
                     time_struct.tm_year = max(time_struct.tm_year, 2);
                     //printf("need %d\n", time_struct.tm_year);
                     to_filter = min((time_t)to_filter, mktime(&time_struct) - 1);
                     time_struct.tm_year = orig_year;
+#endif
                 }
                 
                 if (to_age != MAGIC_INTEGER) {
+                    to_age = max(to_age, 0);
+                    to_age = min(to_age, MAX_ALLOWED_AGE);
+                    
+                    from_filter = max((time_t)from_filter, age_filter_cache[to_age] + 1);
+#if 0
                     time_struct.tm_year -= to_age;
                     time_struct.tm_year = max(time_struct.tm_year, 2);
                     from_filter = max((time_t)from_filter, mktime(&time_struct) + 1);
+#endif
                 }
                 
 #if 0
@@ -705,9 +731,13 @@ struct RequestHandler {
                     code \
                     continue; \
                 }}
-                
+
+#if 0
+#define lock_write_access() \
+    unique_lock<std::mutex> write_lock(write_mutex)
+#else
 #define lock_write_access()
-    //unique_lock<std::mutex> write_lock(write_mutex)
+#endif
 
         if (entity == Entity::USERS) {
             begin_parsing_update(User, user);
