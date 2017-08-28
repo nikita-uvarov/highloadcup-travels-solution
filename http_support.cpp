@@ -10,15 +10,17 @@ void write_only_header_answer(int fd, int code) {
     int res = 0, expected = 0;
     if (code == 200) {
 #define response_200 header_200 header_content_length_zero header_connection_close_real header_server header_host header_rn
-        res = write(fd, response_200, sizeof response_200 - 1);
-        expected = sizeof response_200 - 1;
+        imm_write_call(fd, response_200, sizeof response_200 - 1);
+        //res = write(fd, response_200, sizeof response_200 - 1);
+        //expected = sizeof response_200 - 1;
 #undef response_200
     }
     
     if (code == 400) {
 #define response_400 header_400 header_content_length_zero header_connection_close_real header_server header_host header_rn
-        res = write(fd, response_400, sizeof response_400 - 1);
-        expected = sizeof response_400 - 1;
+        imm_write_call(fd, response_400, sizeof response_400 - 1);
+        //res = write(fd, response_400, sizeof response_400 - 1);
+        //expected = sizeof response_400 - 1;
         //close(fd);
         //was_really_closed = true;
 #undef response_400
@@ -26,16 +28,20 @@ void write_only_header_answer(int fd, int code) {
     
     if (code == 404) {
 #define response_404 header_404 header_content_length_zero header_connection_close_real header_server header_host header_rn
-        res = write(fd, response_404, sizeof response_404 - 1);
-        expected = sizeof response_404 - 1;
+        imm_write_call(fd, response_404, sizeof response_404 - 1);
+        //res = write(fd, response_404, sizeof response_404 - 1);
+        //expected = sizeof response_404 - 1;
         //close(fd);
         //was_really_closed = true;
 #undef response_404
     }
+    
+#if 0
     if (res != expected) {
         printf("write call returned %d but %d was expected\n", res, expected);
         fflush(stdout);
     }
+#endif
 }
 
 /* Initial request bufferization & parsing */

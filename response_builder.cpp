@@ -32,8 +32,12 @@ void itoa_unsafe(int x) {
 
 thread_local li global_t_ready_write;
 
+const int N_RESPONSE_BUFFERS = 2048;
 const int MAX_RESPONSE_SIZE = 4096 * 2;
-thread_local char response_buffer[MAX_RESPONSE_SIZE];
+char response_buffer[N_RESPONSE_BUFFERS][MAX_RESPONSE_SIZE];
+
+thread_local int n_allocs = 0;
+thread_local int fd_index;
 
 struct ResponseBuilder {
     char* buffer_begin;
@@ -41,17 +45,21 @@ struct ResponseBuilder {
     char* buffer_end;
     
     ResponseBuilder() {
-        buffer_begin = buffer_pos = response_buffer;
-        buffer_end = response_buffer + MAX_RESPONSE_SIZE;
+        fd_index++;
+        fd_index %= N_RESPONSE_BUFFERS;
+        
+        buffer_begin = buffer_pos = response_buffer[fd_index];
+        buffer_end = buffer_begin + MAX_RESPONSE_SIZE;
     }
     
     void discard_old() {
-        if (buffer_begin != response_buffer)
+        if (!(buffer_begin >= response_buffer[0] && buffer_begin < response_buffer[N_RESPONSE_BUFFERS - 1] + sizeof(response_buffer[0])))
             delete[] buffer_begin;
     }
     
     void realloc_if_needed(int length) {
         while (buffer_pos + length >= buffer_end) {
+            n_allocs++;
             int double_length = (buffer_end - buffer_begin) * 2;
             
             char* new_buffer = new char[double_length];
@@ -90,7 +98,9 @@ struct ResponseBuilder {
         profile_begin(WRITE_RESPONSE);
         //li t0 = get_ns_timestamp();
         global_t_ready_write = get_ns_timestamp();
-        ::write(fd, buffer_begin, buffer_pos - buffer_begin);
+        imm_write_call(fd, buffer_begin, buffer_pos - buffer_begin);
+        //pending_writes.emplace_back(fd, buffer_begin, buffer_pos - buffer_begin);
+        //::write(fd, buffer_begin, buffer_pos - buffer_begin);
         //li t1 = get_ns_timestamp();
         //printf("write call taken %.3f mks\n", (t1 - t0) / 1000.0);
         //close(fd);

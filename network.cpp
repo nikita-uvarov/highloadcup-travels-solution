@@ -9,9 +9,10 @@ using input_request_handler = http_input_request_handler;
 // 4 threads, 1 instance -> 45k RPS
 // 4 threads, 4 instance -> 117k RPS
 
+const int NUM_CONSUMER_THREADS = 3;
 
 #if 1
-const int NUM_THREADS = 1;
+const int NUM_POLLER_THREADS = 1;
 const int MAX_POLL_EVENTS = 2048; // max events = num instances
 #elif 0
 const int NUM_THREADS = 4;
@@ -181,7 +182,8 @@ void start_epoll_server() {
 
     add_socket_to_epoll_queue(epoll_server.sfd, false);
     
-    vector<int> affinity_mask(NUM_THREADS);
+    vector<int> affinity_mask(NUM_POLLER_THREADS + NUM_CONSUMER_THREADS);
+    
 #ifndef DISABLE_AFFINITY
     printf("Proceeding to thread setup, thread id %d\n", (int)gettid()); fflush(stdout);
     
@@ -220,7 +222,7 @@ void start_epoll_server() {
     //printf("available indices: "); fflush(stdout); for (int x: avail_indices) { printf("%d ", x); fflush(stdout); } printf("\n"); fflush(stdout);
     
     printf("thread mapping (thread -> cpu): "); fflush(stdout);
-    for (int i = 0; i < NUM_THREADS; i++) {
+    for (int i = 0; i < (int)affinity_mask.size(); i++) {
         int cpu = avail_indices[i % avail_indices.size()];
         if (i) printf(", ");
         printf("%d -> %d", i, cpu); fflush(stdout);
@@ -230,17 +232,21 @@ void start_epoll_server() {
     printf("\n"); fflush(stdout);
 #endif
     
-    if (NUM_THREADS > 1) {
-        vector<thread> threads(NUM_THREADS);
+    //if (NUM_THREADS > 1) {
+        vector<thread> threads(NUM_POLLER_THREADS + NUM_CONSUMER_THREADS);
+        
         for (int i = 0; i < (int)threads.size(); i++)
-            threads[i] = thread(poller_thread, i, affinity_mask[i]);
+            if (i < NUM_POLLER_THREADS)
+                threads[i] = thread(poller_thread, i, affinity_mask[i]);
+            else
+                threads[i] = thread(consumer_thread, i, affinity_mask[i]);
         
         for (int i = 0; i < (int)threads.size(); i++)
             threads[i].join();
-    }
+    /*}
     else {
         poller_thread(0, affinity_mask[0]);
-    }
+    }*/
 }
 
 #if 0
@@ -268,7 +274,7 @@ int n_total_first;
 
 
 void close_fd_fast(int fd) {
-    int ec = epoll_ctl(epoll_server.efd, EPOLL_CTL_DEL, fd, 0);
+    epoll_ctl(epoll_server.efd, EPOLL_CTL_DEL, fd, 0);
     //if (ec != -1)
     //    perror("epoll_ctl del");
     close(fd);
@@ -364,24 +370,14 @@ void try_read_from(int fd, bool predict = false) {
 
 void poller_thread(int thread_index, int affinity_mask) {
     global_thread_index = thread_index;
-    
-#ifndef DISABLE_AFFINITY
-    CpuSet mask_set = {};
-    mask_set.as_int[0] = affinity_mask;
-    
-    verify(sched_setaffinity(0, sizeof(cpu_set_t), &mask_set.as_set) == 0);
-#endif
+    set_thread_affinity(affinity_mask, true);
     
     epoll_event* events = nullptr;
     events = (epoll_event*)calloc(MAX_POLL_EVENTS, sizeof(epoll_event));
     
     //vector<input_request_handler> fd_to_queue(MAX_FDS);
     
-#ifndef DISABLE_AFFINITY
-    printf("Started event loop #%d (epoll, affinity mask %d)\n", thread_index + 1, get_affinity_mask()); fflush(stdout);
-#else
-    printf("Started event loop #%d (epoll, affinity disabled)\n", thread_index + 1); fflush(stdout);
-#endif
+    
     prove_thread_stack_use_is_safe(1024 * 1024 * 2);
     lock_memory(read_buf, READ_BUFFER_SIZE / 2, "read buffer");
     lock_memory(response_buffer, MAX_RESPONSE_SIZE / 2, "response buffer");
@@ -413,9 +409,11 @@ void poller_thread(int thread_index, int affinity_mask) {
     
     //int predict_interval = 100;
     
-    vector<int> close_fds, accept_fds;
+    vector<int> close_fds;
     close_fds.reserve(MAX_POLL_EVENTS);
-    accept_fds.reserve(MAX_POLL_EVENTS);
+    bool need_accept = false;
+    
+    // 6200 mks with simple read write
     
     li last_print = get_ns_timestamp();
     while (true) {
@@ -445,11 +443,6 @@ void poller_thread(int thread_index, int affinity_mask) {
                 try_read_from(expected_read_fd, true);
         }
 #endif
-        
-        /*if (all_reads_equal) {
-            for (int i = 0; i < TRY_READS; i++)
-                try_read_from(succesful_reads[0]);
-        }*/
         
 #if 0
         if (thread_index == 0) {
@@ -500,20 +493,6 @@ void poller_thread(int thread_index, int affinity_mask) {
         }
 #endif
         
-#if 0
-        if (all_reads_equal != last_reads) {
-            last_reads = all_reads_equal;
-            n_messages++;
-            
-            if (n_messages <= MAX_MESSAGES) {
-                printf("%d: switched to %s mode, max fd %d\n", (int)time(0), all_reads_equal ? "mixed" : "epoll", max_fd);
-                if (n_messages == MAX_MESSAGES)
-                    printf("this was the last message due to limit %d\n", MAX_MESSAGES);
-                fflush(stdout);
-            }
-        }
-#endif
-        
         int n = epoll_wait(epoll_server.efd, events, MAX_POLL_EVENTS, ACTIVE_WAIT ? 0 : -1);
         
 #if 0
@@ -523,7 +502,8 @@ void poller_thread(int thread_index, int affinity_mask) {
 #endif
         
         close_fds.clear();
-        accept_fds.clear();
+        need_accept = false;
+        
         for (int i = 0; i < n; i++) {
             bool error = (events[i].events & EPOLLERR) || (events[i].events & EPOLLHUP) || (events[i].events & EPOLLRDHUP) || (!(events[i].events & EPOLLIN));
             
@@ -535,12 +515,21 @@ void poller_thread(int thread_index, int affinity_mask) {
             }
             else if (error) {
                 close_fds.push_back(events[i].data.fd);
+#if 0
+                printf("deleting %d, mask: %d %d %d %d\n",
+                       events[i].data.fd,
+                       (events[i].events & EPOLLERR) ? 1 : 0,
+                       (events[i].events & EPOLLHUP) ? 1 : 0,
+                       (events[i].events & EPOLLRDHUP) ? 1 : 0,
+                       (!(events[i].events & EPOLLIN)) ? 1 : 0);
+#endif
             }
             else {
+                need_accept = true;
             }
         }
         
-        for (int fd: accept_fds) {
+        if (need_accept) {
             while (true) {
                 scope_profile(CONNECTION_ACCEPT);
                         
@@ -571,135 +560,20 @@ void poller_thread(int thread_index, int affinity_mask) {
             }
         }
         
-        if (was_others) {
-        for (int i = 0; i < n; i++) {
-            if ((events[i].events & EPOLLERR) || (events[i].events & EPOLLHUP) || (events[i].events & EPOLLRDHUP) || (!(events[i].events & EPOLLIN))) {
-                //fprintf(stderr, "epoll error\n");
-                
-#if 0
-                printf("deleting %d, mask: %d %d %d %d\n",
-                       events[i].data.fd,
-                       (events[i].events & EPOLLERR) ? 1 : 0,
-                       (events[i].events & EPOLLHUP) ? 1 : 0,
-                       (events[i].events & EPOLLRDHUP) ? 1 : 0,
-                       (!(events[i].events & EPOLLIN)) ? 1 : 0);
-#endif
-                close_fd_fast(events[i].data.fd);
-                
-                continue;
-            }
-            else if (events[i].data.fd == epoll_server.sfd) {
-                while (1) {
-                    scope_profile(CONNECTION_ACCEPT);
-                    
-                    struct sockaddr in_addr;
-                    socklen_t in_len;
-                    int infd;
-
-                    in_len = sizeof in_addr;
-                    infd = accept4(epoll_server.sfd, &in_addr, &in_len, SOCK_NONBLOCK);
-                    profile_delimiter(ACCEPT_TO_ACCEPT);
-                    
-                    if (infd == -1) {
-                        if ((errno == EAGAIN) || (errno == EWOULDBLOCK)) {
-                            break;
-                        }
-                        else {
-                            perror("accept");
-                            break;
-                        }
-                    }
-
-                    //printf("sfd socket: "); fflush(stdout);
-                    add_socket_to_epoll_queue(epoll_server.sfd, true);
-                    //printf("infd socket: "); fflush(stdout);
-                    add_socket_to_epoll_queue(infd, false);
-                    
-                    int one = 1;
-                    verify(setsockopt(infd, SOL_TCP, TCP_NODELAY, &one, sizeof(one)) == 0);
-                    verify(setsockopt(infd, SOL_TCP, TCP_QUICKACK, &one, sizeof(one)) == 0);
-                    
-#if 0
-                    static thread_local bool first_time = true;
-                    if (first_time) {
-                        for (int t = 0; t < 2; t++) {
-                            int option = (t == 0 ? SO_RCVBUF : SO_SNDBUF);
-                            socklen_t one_length = 4;
-                            verify(getsockopt(infd, SOL_SOCKET, option, &one, &one_length) >= 0);
-                            printf("%s buffer: %d (will change to %d)\n", (t == 0 ? "receive" : "send"), one, (t == 0 ? READ_BUFFER_SIZE : MAX_RESPONSE_SIZE));
-                        }
-                        first_time = false;
-                    }
-                    
-                    one = READ_BUFFER_SIZE;
-                    verify(setsockopt(infd, SOL_SOCKET, SO_RCVBUF, &one, sizeof(one)) >= 0);
-                    one = MAX_RESPONSE_SIZE;
-                    verify(setsockopt(infd, SOL_SOCKET, SO_SNDBUF, &one, sizeof(one)) >= 0);
-#endif
-                    
-#if 0
-                    for (int t = 0; t < 2; t++) {
-                        int option = (t == 0 ? SO_RCVBUF : SO_SNDBUF);
-                        socklen_t one_length = 4;
-                        verify(getsockopt(infd, SOL_SOCKET, option, &one, &one_length) >= 0);
-                        printf("%s buffer: %d len %d\n", (t == 0 ? "receive" : "send"), one, one_length);
-                        one = 4096;
-                        verify(setsockopt(infd, SOL_SOCKET, option, &one, sizeof(one)) >= 0);
-                        verify(getsockopt(infd, SOL_SOCKET, option, &one, &one_length) >= 0);
-                        printf("%s buffer: %d len %d\n", (t == 0 ? "receive" : "send"), one, one_length);
-                    }
-#endif
-
-#if 0
-                    verify(one != 0);
-                    verify(getsockopt(infd, SOL_TCP, TCP_QUICKACK, &one, &one_length) >= 0);
-                    printf("length %d value %d\n", one_length, one);
-                    verify(one != 0);
-#endif
-                }
-                continue;
-            }
-            else 
+        for (int fd: close_fds) {
+            close_fd_fast(fd);
+        }
             
-            if (n > 0) {
-                printf("polled %d, %.3f mks read, %.3f mks logic, %.3f mks write\n", n, total_reads / 1e3, total_logic / 1e3, total_writes / 1e3);
-                total_reads = total_logic = total_writes = 0;
-                fflush(stdout);
-            }
-            
-            if (i == n - 1 && global_last_request_is_get != last_request_is_get) {
-                printf("[%d] Request type switch: '%s' -> '%s', max fd + 1: %d\n", global_thread_index, (last_request_is_get ? "GET" : "POST"), (global_last_request_is_get ? "GET" : "POST"), max_fd);
-                last_request_is_get = global_last_request_is_get;
-            }
+        if (false) {
+            printf("polled %d, %.3f mks read, %.3f mks logic, %.3f mks write, %d allocs\n", n, total_reads / 1e3, total_logic / 1e3, total_writes / 1e3, n_allocs);
+            total_reads = total_logic = total_writes = 0;
+            n_allocs = 0;
+            fflush(stdout);
+        }
+        
+        if (global_last_request_is_get != last_request_is_get) {
+            printf("[%d] Request type switch: '%s' -> '%s', max fd + 1: %d\n", global_thread_index, (last_request_is_get ? "GET" : "POST"), (global_last_request_is_get ? "GET" : "POST"), max_fd);
+            last_request_is_get = global_last_request_is_get;
         }
     }
-    
-    /*
-    breakAll:;
-    printf("Entering direct read poll\n"); fflush(stdout);
-    //input_request_handler handler;
-    //handler.request_content = buf;
-    
-    t_start = get_ns_timestamp();
-    n_epolls = 0;
-    
-    while (true) {
-        ssize_t count;
-        static thread_local char buf[READ_BUFFER_SIZE];
-        count = read(read_fd, buf, READ_BUFFER_SIZE);
-        
-        n_epolls++;
-        if (n_epolls % 100000 == 0)
-            printf("%d reads, %.3f ns / read average\n", n_epolls, (get_ns_timestamp() - t_start) / (double)n_epolls);
-        
-        if (count > 0) {
-            n_epolls = 0;
-            t_start = get_ns_timestamp();
-            //buf[count] = 0;
-            //handler.request_length = count;
-            write_only_header_answer(read_fd, 200);
-        }
-    }
-
-    free(events);*/
 }

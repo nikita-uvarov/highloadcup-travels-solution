@@ -37,10 +37,12 @@ using namespace std;
 #define DISABLE_VALIDATE
 #define DISABLE_PROFILING
 #define DISABLE_AFFINITY
+#define DISABLE_DATABASE_WRITE_LOCKS
 
 #include "utils.cpp"
 #include "profiler.cpp"
 #include "validator.cpp"
+#include "mtqueue.cpp"
 #include "response_builder.cpp"
 #include "database.cpp"
 #include "http_support.cpp"

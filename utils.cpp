@@ -236,3 +236,15 @@ void inspect_server_parameters() {
         printf("clock_gettime cost (ns): %.5f, hash %lld\n", (t_end - t_begin) / (double)N_TEST_GETTIMES, hash); fflush(stdout);
     }
 }
+
+void set_thread_affinity(int affinity_mask, bool is_poller) {
+    #ifndef DISABLE_AFFINITY
+        CpuSet mask_set = {};
+        mask_set.as_int[0] = affinity_mask;
+        
+        verify(sched_setaffinity(0, sizeof(cpu_set_t), &mask_set.as_set) == 0);
+        printf("Started %s thread #%d (affinity mask %d)\n", is_poller ? "epoll" : "consumer", global_thread_index + 1, get_affinity_mask()); fflush(stdout);
+    #else
+        printf("Started %s thread #%d (affinity disabled)\n", is_poller ? "epoll" : "consumer", global_thread_index + 1); fflush(stdout);
+    #endif
+}

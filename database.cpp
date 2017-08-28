@@ -732,7 +732,7 @@ struct RequestHandler {
                     continue; \
                 }}
 
-#if 0
+#ifndef DISABLE_DATABASE_WRITE_LOCKS
 #define lock_write_access() \
     unique_lock<std::mutex> write_lock(write_mutex)
 #else
