@@ -60,7 +60,9 @@ struct Location {
     void update_cache();
     
     vector<DatedVisit> visits;
-    vector<int> mark_sum;
+    
+    // total sum, male only sum, male count
+    vector<tuple<short, short, short>> mark_sum;
     
     void update_mark_sums();
 };
@@ -231,6 +233,12 @@ void reindex_database() {
         if (visit_by_id[id].id != id)
             continue;
         visit_by_id[id].update_dependent_cache();
+    }
+    
+    for (int id = 0; id < (int)location_by_id.size(); id++) {
+        if (location_by_id[id].id != id)
+            continue;
+        location_by_id[id].update_mark_sums();
     }
     
     printf("Dependent cache update took %.3f s\n", (get_ns_timestamp() - reindex_start) / (double)1e9);
@@ -681,25 +689,50 @@ struct RequestHandler {
 #endif
                 
                 int n_marks = 0, mark_sum = 0;
-                while (it < it_end) {
-                    Visit& visit = visit_by_id[it->id];
-                    it++;
+                
+                if (to_age == MAGIC_INTEGER && from_age == MAGIC_INTEGER) {
+                    n_marks = it_end - it;
                     
-                    if (filter_age) {
-                        User& user = user_by_id[visit.user_id];
-                        if (!(user.birth_date >= from_filter && user.birth_date <= to_filter)) {
-                            continue;
+                    if (n_marks > 0) {
+                        int l = it - location.visits.begin();
+                        int r = it_end - location.visits.begin() - 1;
+                        
+                        mark_sum = get<0>(location.mark_sum[r]) - (l ? get<0>(location.mark_sum[l - 1]) : 0);
+                        if (gender != '*') {
+                            int male_sum = get<1>(location.mark_sum[r]) - (l ? get<1>(location.mark_sum[l - 1]) : 0);
+                            int male_cnt = get<2>(location.mark_sum[r]) - (l ? get<2>(location.mark_sum[l - 1]) : 0);
+                            
+                            if (gender == 'm')
+                                n_marks = male_cnt, mark_sum = male_sum;
+                            else
+                                n_marks = n_marks - male_cnt, mark_sum = mark_sum - male_sum;
+                        }
+                    }
+                    else {
+                        n_marks = 0;
+                    }
+                }
+                else {
+                    while (it < it_end) {
+                        Visit& visit = visit_by_id[it->id];
+                        it++;
+                        
+                        if (filter_age) {
+                            User& user = user_by_id[visit.user_id];
+                            if (!(user.birth_date >= from_filter && user.birth_date <= to_filter)) {
+                                continue;
+                            }
+                            
+                            if (gender != '*' && gender != user.gender) continue;
+                        }
+                        else if (gender != '*') {
+                            User& user = user_by_id[visit.user_id];
+                            if (user.gender != gender) continue;
                         }
                         
-                        if (gender != '*' && gender != user.gender) continue;
+                        n_marks++;
+                        mark_sum += visit.mark;
                     }
-                    else if (gender != '*') {
-                        User& user = user_by_id[visit.user_id];
-                        if (user.gender != gender) continue;
-                    }
-                    
-                    n_marks++;
-                    mark_sum += visit.mark;
                 }
                 
                 if (mark_sum == 0) {
@@ -878,7 +911,16 @@ struct RequestHandler {
                 
                 if (first_name) user->first_name = json_escape_string(first_name);
                 if (last_name) user->last_name = json_escape_string(last_name);
-                if (gender) user->gender = *gender;
+                
+                if (gender && user->gender != *gender) {
+                    user->gender = *gender;
+                    
+                    // FIXME: TEST WHETHER IT IS PERFORMANCE BOTTLENECK
+                    for (DatedVisit& dv: user->visits) {
+                        location_by_id[visit_by_id[dv.id].location_id].update_mark_sums();
+                    }
+                }
+                
                 if (birth_date != MAGIC_INTEGER) user->birth_date = birth_date;
                 
                 user->update_cache();
@@ -1155,9 +1197,15 @@ void Visit::update_dependent_cache() {
 void Location::update_mark_sums() {
     int n = visits.size();
     mark_sum.resize(n);
-    int sum = 0;
+    int sum = 0, male_sum = 0, male_count = 0;
     for (int i = 0; i < n; i++) {
-        sum += visit_by_id[visits[i].id].mark;
-        mark_sum[i] = sum;
+        Visit& visit = visit_by_id[visits[i].id];
+        sum += visit.mark;
+        if (user_by_id[visit.user_id].gender == 'm') {
+            male_sum += visit.mark;
+            male_count++;
+        }
+        
+        mark_sum[i] = make_tuple(sum, male_sum, male_count);
     }
 }
