@@ -42,7 +42,7 @@ struct User {
     char gender;
     timestamp birth_date;
     
-    string json_cache;
+    fast_string http_cache;
     void update_cache();
     
     vector<DatedVisit> visits;
@@ -56,7 +56,13 @@ struct Location {
     string city; // json-escaped
     int distance;
     
+    fast_string http_cache;
+    void update_cache();
+    
     vector<DatedVisit> visits;
+    vector<int> mark_sum;
+    
+    void update_mark_sums();
 };
 
 // aim at 169 s.
@@ -67,6 +73,12 @@ struct Visit {
     int user_id;
     timestamp visited_at;
     char mark;
+    
+    fast_string http_cache;
+    void update_cache();
+    
+    fast_string json_cache;
+    void update_dependent_cache();
 };
 
 vector<User> user_by_id;
@@ -142,6 +154,7 @@ int get_compression_profit(string& s) {
 #endif
 
 void reindex_database() {
+    li reindex_start = get_ns_timestamp();
     //int profit_email = 0, profit_first_name = 0, profit_last_name = 0, profit_place = 0, profit_country = 0, profit_country_unesc = 0, profit_city = 0;
     
     int n_users = 0;
@@ -211,6 +224,17 @@ void reindex_database() {
     location_by_id.reserve(location_by_id.size() + RESERVE);
     user_by_id.reserve(user_by_id.size() + RESERVE);
     
+    printf("Reindexing took %.3f s\n", (get_ns_timestamp() - reindex_start) / (double)1e9);
+    reindex_start = get_ns_timestamp();
+    
+    for (int id = 0; id < (int)visit_by_id.size(); id++) {
+        if (visit_by_id[id].id != id)
+            continue;
+        visit_by_id[id].update_dependent_cache();
+    }
+    
+    printf("Dependent cache update took %.3f s\n", (get_ns_timestamp() - reindex_start) / (double)1e9);
+    
     printf("Database is ready (%d users, %d locations, %d visits)\n", n_users, n_locations, n_visits);
     fflush(stdout);
 }
@@ -274,6 +298,7 @@ void load_json_dump(char* mutable_buffer) {
             new_location.country = json_escape_string(new_location.country_unescaped);
             new_location.city = json_escape_string(o["city"].GetString());
             new_location.distance = o["distance"].GetInt();
+            new_location.update_cache();
             
             verify(new_location.distance >= 0);
         }
@@ -286,6 +311,7 @@ void load_json_dump(char* mutable_buffer) {
             new_visit.user_id = o["user"].GetInt();
             new_visit.visited_at = o["visited_at"].GetInt();
             new_visit.mark = o["mark"].GetInt();
+            new_visit.update_cache();
             
             verify(new_visit.mark >= 0 && new_visit.mark <= 5);
         }
@@ -336,42 +362,23 @@ Entity get_entity(const char*& path, int path_length) {
     path += 8;
     return Entity::VISITS;
 }
-
-void User::update_cache() {
-    json_cache = "";
-    
-    ResponseBuilder json;
-    append_str(json, "{\"id\":");
-    json.append_int(id);
-    append_str(json, ",\"email\":\"");
-    json.append(email.data(), email.length());
-    append_str(json, "\",\"first_name\":");
-    json.append(first_name.data(), first_name.length());
-    append_str(json, ",\"last_name\":");
-    json.append(last_name.data(), last_name.length());
-    append_str(json, ",\"gender\":\"");
-    json.append(&gender, 1);
-    append_str(json, "\",\"birth_date\":");
-    json.append_int(birth_date);
-    append_str(json, "}");
-    
-    json_cache = string(json.buffer_begin, json.buffer_pos);
-}
     
 #define header_200 "HTTP/1.1 200 OK\r\n"
 #define header_400 "HTTP/1.1 400 Bad Request\r\n"
 #define header_404 "HTTP/1.1 404 Not Found\r\n"
     
 #define header_content_length_zero "Content-Length: 0\r\n"
-//#define header_connection_close "Connection: keep-alive\r\n"
-#define header_connection_close ""
-#define header_server "Server: 1\r\n"
-//#define header_host "Host: travels.com\r\n"
-#define header_host
+#define header_two_headers "X: 1\r\nY: 1\r\n"
 #define header_rn "\r\n"
+
+//#define header_connection_close "Connection: keep-alive\r\n"
+//#define header_connection_close ""
+//#define header_server "Server: 1\r\n"
+//#define header_host "Host: travels.com\r\n"
+//#define header_host
     
 // if doesn't work, easy to fix
-#define header_connection_close_real "Connection: keep-alive\r\n"
+//#define header_connection_close_real "Connection: keep-alive\r\n"
 
 struct RequestHandler {
     bool is_get;
@@ -450,8 +457,8 @@ struct RequestHandler {
     }
     
 #define header_content_length_tbd "Content-Length: 0      \r\n"
-#define zero_offset_string header_200 header_connection_close header_host header_server "Content-Length:"
-#define HTTP_OK_PREFIX header_200 header_connection_close header_host header_server header_content_length_tbd header_rn
+#define zero_offset_string header_200 "Content-Length:"
+#define HTTP_OK_PREFIX header_200 header_content_length_tbd header_rn
 
 #ifndef DISABLE_VALIDATE
 #define validate_json() \
@@ -474,6 +481,12 @@ struct RequestHandler {
     int handle_get(int fd) {
         if (entity == Entity::USERS) {
             if (!id_exists(user_by_id, id)) return 404;
+            
+            if (!get_visits) {
+                user_by_id[id].http_cache.imm_write(fd);
+                return 200;
+            }
+            
             User& user = user_by_id[id];
             
             if (!get_visits) {
@@ -481,7 +494,7 @@ struct RequestHandler {
                 
                 begin_response();
                 
-#if 0
+#if 1
                 append_str(json, HTTP_OK_PREFIX "{\"id\":");
                 json.append_int(user.id);
                 append_str(json, ",\"email\":\"");
@@ -533,16 +546,20 @@ struct RequestHandler {
                     it++;
                     Location& location = location_by_id[visit.location_id];
                     
-                    if (country_ptr_begin) {
-                        if (country_ptr_end - country_ptr_begin != (long)location.country_unescaped.length() || memcmp(country_ptr_begin, location.country_unescaped.data(), location.country_unescaped.length()))
-                            continue;
-                    }
-                    
                     if (to_distance != MAGIC_INTEGER) {
                         if (location.distance >= to_distance)
                             continue;
                     }
                     
+                    if (country_ptr_begin) {
+                        if (country_ptr_end - country_ptr_begin != (long)location.country_unescaped.length() || memcmp(country_ptr_begin, location.country_unescaped.data(), location.country_unescaped.length()))
+                            continue;
+                    }
+                    
+#if 1
+                    json.append(nf_memory + visit.json_cache.offset, visit.json_cache.length);
+                    n_visits++;
+#else
                     if (n_visits) {
                         append_str(json, ",{\"mark\":");
                     }
@@ -557,7 +574,12 @@ struct RequestHandler {
                     append_str(json, ",\"place\":");
                     json.append(location.place.data(), location.place.length());
                     append_str(json, "}");
+#endif
                 }
+                
+                // remove last comma
+                if (n_visits)
+                    json.buffer_pos--;
                 
                 append_str(json, "]}");
                 
@@ -569,6 +591,12 @@ struct RequestHandler {
         }
         else if (entity == Entity::LOCATIONS) {
             if (!id_exists(location_by_id, id)) return 404;
+            
+            if (!get_avg) {
+                location_by_id[id].http_cache.imm_write(fd);
+                return 200;
+            }
+            
             Location& location = location_by_id[id];
             
             if (!get_avg) {
@@ -678,7 +706,7 @@ struct RequestHandler {
                     append_str(json, "0}");
                 }
                 else {
-                    static char mark_avg[50];
+                    char mark_avg[16];
                     sprintf(mark_avg, "%.5f}", mark_sum / (double)n_marks + 1e-12);
                     json.append(mark_avg, strlen(mark_avg));
                 }
@@ -689,6 +717,12 @@ struct RequestHandler {
         }
         else {
             if (!id_exists(visit_by_id, id)) return 404;
+            
+            {   
+                visit_by_id[id].http_cache.imm_write(fd);
+                return 200;
+            }
+            
             Visit& visit = visit_by_id[id];
             
             begin_response();
@@ -715,15 +749,12 @@ struct RequestHandler {
     
     int handle_post(int fd, const char* body) {
 #define header_content_length_four "Content-Length: 2\r\n"
-//#define header_content_type "Content-Type: application/json\r\n"
-#define header_content_type
-#define HTTP_OK_WITH_EMPTY_JSON_RESPONSE header_200 header_connection_close header_server header_host header_content_type header_content_length_four header_rn "{}"
-//printf("ok json '%s'\n", HTTP_OK_WITH_EMPTY_JSON_RESPONSE);
-//#define HTTP_OK_WITH_EMPTY_JSON_RESPONSE "HTTP/1.1 200 OK\r\n\r\n{}"
+#define HTTP_OK_WITH_EMPTY_JSON_RESPONSE header_200 header_content_length_four header_rn "{}"
+        
 #define successful_update() \
         profile_begin(WRITE_RESPONSE); \
         global_t_ready_write = get_ns_timestamp(); \
-        write(fd, HTTP_OK_WITH_EMPTY_JSON_RESPONSE, sizeof(HTTP_OK_WITH_EMPTY_JSON_RESPONSE) - 1); \
+        imm_write_call(fd, HTTP_OK_WITH_EMPTY_JSON_RESPONSE, sizeof(HTTP_OK_WITH_EMPTY_JSON_RESPONSE) - 1); \
         profile_end(WRITE_RESPONSE)
         //close(fd);
         
@@ -888,6 +919,7 @@ struct RequestHandler {
                 new_location.country = json_escape_string(new_location.country_unescaped);
                 new_location.city = json_escape_string(city);
                 new_location.distance = distance;
+                new_location.update_cache();
                 
                 return 200;
             }
@@ -909,6 +941,13 @@ struct RequestHandler {
                 }
                 
                 if (distance != MAGIC_INTEGER) location->distance = distance;
+                
+                location->update_cache();
+                
+                if (place) {
+                    for (DatedVisit& dv: location->visits)
+                        visit_by_id[dv.id].update_dependent_cache();
+                }
                 
                 return 200;
             }
@@ -960,6 +999,8 @@ struct RequestHandler {
                 new_visit.mark = mark;
                 new_visit.user_id = user_id;
                 new_visit.location_id = location_id;
+                new_visit.update_cache();
+                new_visit.update_dependent_cache();
                 
                 DatedVisit dv = { new_visit.id, new_visit.visited_at };
                 
@@ -1004,6 +1045,7 @@ struct RequestHandler {
                     auto it = lower_bound(all(old_location->visits), DatedVisit { id, visit->visited_at });
                     check(it != old_location->visits.end());
                     old_location->visits.erase(it);
+                    old_location->update_mark_sums();
                     
                     Location* new_location = location;
                     if (!new_location)
@@ -1011,11 +1053,18 @@ struct RequestHandler {
                     
                     DatedVisit dv = { id, new_visited_at };
                     new_location->visits.insert(upper_bound(all(new_location->visits), dv), dv);
+                    new_location->update_mark_sums();
+                }
+                else if (mark != MAGIC_INTEGER) {
+                    location_by_id[visit->location_id].update_mark_sums();
                 }
                 
                 visit->visited_at = new_visited_at;
                 if (location) visit->location_id = location_id;
                 if (user) visit->user_id = user_id;
+                
+                visit->update_cache();
+                visit->update_dependent_cache();
                 
                 return 200;
             }
@@ -1025,10 +1074,90 @@ struct RequestHandler {
         return 400;
     }
     
-#undef HTTP_OK_PREFIX
 #undef validate_json
 };
 
-void do_benchmark() {
+void User::update_cache() {
+    ResponseBuilder json;
     
+    append_str(json, HTTP_OK_PREFIX);
+    append_str(json, "{\"id\":");
+    json.append_int(id);
+    append_str(json, ",\"email\":\"");
+    json.append(email.data(), email.length());
+    append_str(json, "\",\"first_name\":");
+    json.append(first_name.data(), first_name.length());
+    append_str(json, ",\"last_name\":");
+    json.append(last_name.data(), last_name.length());
+    append_str(json, ",\"gender\":\"");
+    json.append(&gender, 1);
+    append_str(json, "\",\"birth_date\":");
+    json.append_int(birth_date);
+    append_str(json, "}");
+    json.embed_content_length(sizeof zero_offset_string, sizeof HTTP_OK_PREFIX - 1);
+    
+    http_cache = nf_wrap(json.buffer_begin, json.buffer_pos);
+}
+
+void Location::update_cache() {
+    ResponseBuilder json;
+    
+    append_str(json, HTTP_OK_PREFIX "{\"id\":");
+    json.append_int(id);
+    append_str(json, ",\"place\":");
+    json.append(place.data(), place.length());
+    append_str(json, ",\"country\":");
+    json.append(country.data(), country.length());
+    append_str(json, ",\"city\":");
+    json.append(city.data(), city.length());
+    append_str(json, ",\"distance\":");
+    json.append_int(distance);
+    append_str(json, "}");
+    json.embed_content_length(sizeof zero_offset_string, sizeof HTTP_OK_PREFIX - 1);
+    
+    http_cache = nf_wrap(json.buffer_begin, json.buffer_pos);
+}
+
+void Visit::update_cache() {
+    ResponseBuilder json;
+    
+    append_str(json, HTTP_OK_PREFIX "{\"id\":");
+    json.append_int(id);
+    append_str(json, ",\"location\":");
+    json.append_int(location_id);
+    append_str(json, ",\"user\":");
+    json.append_int(user_id);
+    append_str(json, ",\"visited_at\":");
+    json.append_int(visited_at);
+    append_str(json, ",\"mark\":");
+    json.append_int(mark);
+    append_str(json, "}");
+    json.embed_content_length(sizeof zero_offset_string, sizeof HTTP_OK_PREFIX - 1);
+    
+    http_cache = nf_wrap(json.buffer_begin, json.buffer_pos);
+}
+
+void Visit::update_dependent_cache() {
+    ResponseBuilder json;
+    
+    append_str(json, "{\"mark\":");
+                    
+    json.append_int(mark);
+    append_str(json, ",\"visited_at\":");
+    json.append_int(visited_at);
+    append_str(json, ",\"place\":");
+    json.append(location_by_id[location_id].place.data(), location_by_id[location_id].place.length());
+    append_str(json, "},");
+    
+    json_cache = nf_wrap(json.buffer_begin, json.buffer_pos);
+}
+
+void Location::update_mark_sums() {
+    int n = visits.size();
+    mark_sum.resize(n);
+    int sum = 0;
+    for (int i = 0; i < n; i++) {
+        sum += visit_by_id[visits[i].id].mark;
+        mark_sum[i] = sum;
+    }
 }

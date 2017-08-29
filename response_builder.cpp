@@ -30,8 +30,6 @@ void itoa_unsafe(int x) {
 
 /* Response builder */
 
-poller_local li global_t_ready_write;
-
 const int N_RESPONSE_BUFFERS = 2048;
 const int MAX_RESPONSE_SIZE = 4096 * 2;
 poller_local char response_buffer[N_RESPONSE_BUFFERS][MAX_RESPONSE_SIZE];

@@ -45,8 +45,8 @@ using namespace std;
 #include "utils.cpp"
 #include "profiler.cpp"
 #include "validator.cpp"
-#include "nofree.cpp"
 #include "mtqueue.cpp"
+#include "nofree.cpp"
 #include "response_builder.cpp"
 #include "database.cpp"
 #include "http_support.cpp"
@@ -67,8 +67,6 @@ int main() {
 #endif
     load_initial_data();
     initialize_age_cache();
-    
-    do_benchmark();
     
     start_epoll_server();
     

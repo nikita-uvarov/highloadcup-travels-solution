@@ -152,14 +152,17 @@ string memory_human_readable(unsigned int bytes) {
     return string(buf);
 }
 
+void print_nofree_stats();
+
 void print_memory_stats() {
     struct mallinfo info = mallinfo();
-    printf("Memory stats: occupied %s, arena %s, preallocated free %s, keepcost %s\n",
+    printf("Memory stats: occupied %s, arena %s, preallocated free %s, keepcost %s; ",
         memory_human_readable(info.uordblks).c_str(),
         memory_human_readable(info.arena).c_str(),
         memory_human_readable(info.fordblks).c_str(),
         memory_human_readable(info.keepcost).c_str()
     );
+    print_nofree_stats();
 }
 
 void load_initial_data() {

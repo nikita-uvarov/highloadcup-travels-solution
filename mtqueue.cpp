@@ -1,5 +1,7 @@
 #include "concurrentqueue/blockingconcurrentqueue.h"
 
+poller_local li global_t_ready_write;
+
 /* Mutli threaded producer-consumer queue */
 
 using pending_write = tuple<int, char*, int>;

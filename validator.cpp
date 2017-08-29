@@ -81,7 +81,7 @@ struct AnswerValidator {
         }
 #endif
         
-        printf("answer '%.*s'\n", answer_length, answer);
+        //printf("answer '%.*s'\n", answer_length, answer);
         if (it == expected_answer.end()) {
             printf("Failed to check answer for '%s'\n", request.c_str());
             abort();
@@ -111,7 +111,7 @@ struct AnswerValidator {
             }
         }
         else {
-            printf("Answers for '%s':\n'%.*s',\n'%s' expected\n", request.c_str(), answer_length, answer, it->second.second.c_str());
+            //printf("Answers for '%s':\n'%.*s',\n'%s' expected\n", request.c_str(), answer_length, answer, it->second.second.c_str());
             
             Document expected;
             expected.Parse(it->second.second.c_str());
@@ -125,7 +125,7 @@ struct AnswerValidator {
             }
             
             verify(expected == answer_doc);
-            printf("Correct answer!\n\n");
+            //printf("Correct answer!\n\n");
         }
     }
 };
