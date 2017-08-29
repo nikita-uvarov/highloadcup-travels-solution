@@ -120,11 +120,16 @@ struct AnswerValidator {
             Document answer_doc;
             answer_doc.Parse(string(answer, answer + answer_length).c_str());
             if (answer_doc.HasParseError()) {
+                printf("Answers for '%s':\n'%.*s',\n'%s' expected\n", request.c_str(), answer_length, answer, it->second.second.c_str());
                 printf("Answer has parse error: %s (%d)\n", GetParseError_En(answer_doc.GetParseError()), (int)answer_doc.GetErrorOffset());
                 abort();
             }
             
-            verify(expected == answer_doc);
+            bool ok = expected == answer_doc;
+            if (!ok) {
+                printf("Answers for '%s':\n'%.*s',\n'%s' expected\n", request.c_str(), answer_length, answer, it->second.second.c_str());
+            }
+            verify(ok);
             //printf("Correct answer!\n\n");
         }
     }

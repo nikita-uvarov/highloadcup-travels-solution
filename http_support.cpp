@@ -202,9 +202,10 @@ int process_request_options(RequestHandler& handler, const char* path, const cha
 int process_get_request_raw(int fd, const char* path, int path_length);
 int process_post_request_raw(int fd, const char* path, int path_length, const char* body);
 
-thread_local li global_t_ready;
-thread_local bool global_last_request_is_get = false;
-thread_local li global_t_polled;
+poller_local li global_t_ready;
+poller_local bool global_last_request_is_get = false;
+poller_local int total_requests = 0;
+poller_local li global_t_polled;
 
 #if 0
 li LONG_REQUEST_NS = 250 * (li)1000; // 500 mks is long
@@ -212,12 +213,17 @@ li LONG_REQUEST_NS = 250 * (li)1000; // 500 mks is long
 li LONG_REQUEST_NS = 400 * (li)1000;
 #endif
 
-thread_local int messages_limit = 200;
+poller_local int messages_limit = 10;
 
-thread_local li total_reads, total_logic, total_writes;
+poller_local li total_reads, total_logic, total_writes;
 
 void request_completed(bool is_get, const char* path, int path_length, int code) {
+    if (is_get != global_last_request_is_get)
+        total_requests = 0;
+    
     global_last_request_is_get = is_get;
+    total_requests++;
+    
     li t_answered = get_ns_timestamp();
     total_reads += global_t_ready - global_t_polled;
     total_logic += global_t_ready_write - global_t_ready;

@@ -244,6 +244,21 @@ void inspect_server_parameters() {
         li t_end = get_ns_timestamp();
         printf("clock_gettime cost (ns): %.5f, hash %lld\n", (t_end - t_begin) / (double)N_TEST_GETTIMES, hash); fflush(stdout);
     }
+    
+    {
+        const int N_TEST_SPRINTFS = 1e6;
+        li t_begin = get_ns_timestamp();
+        
+        li hash = 0;
+        for (int i = 0; i < N_TEST_SPRINTFS; i++) {
+            char buf[100];
+            sprintf(buf, "%.5f", rand() / (double)RAND_MAX);
+            hash += buf[2] - '0';
+        }
+            
+        li t_end = get_ns_timestamp();
+        printf("sprintf(double) cost (ns): %.5f, hash %lld\n", (t_end - t_begin) / (double)N_TEST_SPRINTFS, hash); fflush(stdout);
+    }
 }
 
 /* Affinity */

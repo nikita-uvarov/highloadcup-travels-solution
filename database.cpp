@@ -64,6 +64,8 @@ struct Location {
     // total sum, male only sum, male count
     vector<tuple<short, short, short>> mark_sum;
     
+    void invalidate_mark_sums();
+    bool maybe_update_mark_sums();
     void update_mark_sums();
 };
 
@@ -155,6 +157,51 @@ int get_compression_profit(string& s) {
 }
 #endif
 
+void show_new_pagefault_count(const char* logtext) {
+    static int last_majflt = 0, last_minflt = 0;
+    struct rusage usage;
+
+    getrusage(RUSAGE_SELF, &usage);
+
+    printf("%s: Pagefaults, Major:%ld, " \
+            "Minor:%ld\n", logtext,
+            usage.ru_majflt - last_majflt,
+            usage.ru_minflt - last_minflt);
+
+    last_majflt = usage.ru_majflt; 
+    last_minflt = usage.ru_minflt;
+}
+
+void reserve_process_memory(size_t size) {
+   	char* buffer = (char*)malloc(size);
+   
+   	for (size_t i = 0; i < size; i += sysconf(_SC_PAGESIZE)) {
+   		buffer[i] = 0;
+   	}
+   	free(buffer);
+    
+   	show_new_pagefault_count(("Caused by reserving " + memory_human_readable(size) + " through malloc").c_str());
+}
+
+void setup_nf() {
+    show_new_pagefault_count("Initial count");
+    reserve_process_memory(200 * 1024 * (size_t)1024 + NEED_NF_MEMORY);
+    initialize_nf();
+}
+
+void lock_all_memory() {
+    printf("Locking all memory...\n");
+    
+    if (mlockall(MCL_CURRENT | MCL_FUTURE) != 0) {
+        perror("mlockall");
+    }
+    else {
+        printf("Successfully locked!\n");
+        
+    }
+    fflush(stdout);
+}
+
 void reindex_database() {
     li reindex_start = get_ns_timestamp();
     //int profit_email = 0, profit_first_name = 0, profit_last_name = 0, profit_place = 0, profit_country = 0, profit_country_unesc = 0, profit_city = 0;
@@ -229,15 +276,27 @@ void reindex_database() {
     printf("Reindexing took %.3f s\n", (get_ns_timestamp() - reindex_start) / (double)1e9);
     reindex_start = get_ns_timestamp();
     
+    printf("Beginning to setup NF memory\n"); fflush(stdout);
+    
+    setup_nf();
+    
+    for (int id = 0; id < (int)user_by_id.size(); id++) {
+        if (user_by_id[id].id != id)
+            continue;
+        user_by_id[id].update_cache();
+    }
+    
     for (int id = 0; id < (int)visit_by_id.size(); id++) {
         if (visit_by_id[id].id != id)
             continue;
+        visit_by_id[id].update_cache();
         visit_by_id[id].update_dependent_cache();
     }
     
     for (int id = 0; id < (int)location_by_id.size(); id++) {
         if (location_by_id[id].id != id)
             continue;
+        location_by_id[id].update_cache();
         location_by_id[id].update_mark_sums();
     }
     
@@ -245,6 +304,23 @@ void reindex_database() {
     
     printf("Database is ready (%d users, %d locations, %d visits)\n", n_users, n_locations, n_visits);
     fflush(stdout);
+    
+    lock_all_memory();
+}
+
+void fix_database_caches() {
+    int work = 0;
+    li fix_start = get_ns_timestamp();
+    
+    for (int id = 0; id < (int)location_by_id.size(); id++) {
+        if (location_by_id[id].id != id)
+            continue;
+        
+        if (location_by_id[id].maybe_update_mark_sums())
+            work += location_by_id[id].visits.size();
+    }
+    printf("Database caches fixed in %.3f s, total work %d\n", (get_ns_timestamp() - fix_start) / (double)1e9, work);
+    print_memory_stats();
 }
 
 void load_json_dump(char* mutable_buffer) {
@@ -291,7 +367,7 @@ void load_json_dump(char* mutable_buffer) {
             new_user.last_name = json_escape_string(o["last_name"].GetString());
             new_user.gender = o["gender"].GetString()[0];
             new_user.birth_date = o["birth_date"].GetInt();
-            new_user.update_cache();
+            //new_user.update_cache();
             //all_user_emails.emplace(new_user.email);
             
             verify(new_user.gender == 'm' || new_user.gender == 'f');
@@ -306,7 +382,7 @@ void load_json_dump(char* mutable_buffer) {
             new_location.country = json_escape_string(new_location.country_unescaped);
             new_location.city = json_escape_string(o["city"].GetString());
             new_location.distance = o["distance"].GetInt();
-            new_location.update_cache();
+            //new_location.update_cache();
             
             verify(new_location.distance >= 0);
         }
@@ -319,7 +395,7 @@ void load_json_dump(char* mutable_buffer) {
             new_visit.user_id = o["user"].GetInt();
             new_visit.visited_at = o["visited_at"].GetInt();
             new_visit.mark = o["mark"].GetInt();
-            new_visit.update_cache();
+            //new_visit.update_cache();
             
             verify(new_visit.mark >= 0 && new_visit.mark <= 5);
         }
@@ -476,6 +552,14 @@ struct RequestHandler {
 #define validate_json()
 #endif
 
+#ifndef DISABLE_VALIDATE
+#define validate_raw(fast_str) \
+        char* data_ptr = nf_memory + fast_str.offset + sizeof HTTP_OK_PREFIX - 1; \
+        validator.supply_data(data_ptr, fast_str.length - (sizeof HTTP_OK_PREFIX - 1))
+#else
+#define validate_raw(fast_str)
+#endif
+
 #define begin_response() \
     ResponseBuilder json; \
     scope_profile(BUILD_JSON_RESPONSE);
@@ -491,6 +575,7 @@ struct RequestHandler {
             if (!id_exists(user_by_id, id)) return 404;
             
             if (!get_visits) {
+                validate_raw(user_by_id[id].http_cache);
                 user_by_id[id].http_cache.imm_write(fd);
                 return 200;
             }
@@ -601,6 +686,7 @@ struct RequestHandler {
             if (!id_exists(location_by_id, id)) return 404;
             
             if (!get_avg) {
+                validate_raw(location_by_id[id].http_cache);
                 location_by_id[id].http_cache.imm_write(fd);
                 return 200;
             }
@@ -690,7 +776,7 @@ struct RequestHandler {
                 
                 int n_marks = 0, mark_sum = 0;
                 
-                if (to_age == MAGIC_INTEGER && from_age == MAGIC_INTEGER) {
+                if ((to_age == MAGIC_INTEGER && from_age == MAGIC_INTEGER) && !location.mark_sum.empty()) {
                     n_marks = it_end - it;
                     
                     if (n_marks > 0) {
@@ -735,6 +821,11 @@ struct RequestHandler {
                     }
                 }
                 
+                if (INTENTIONAL_ERRORS > 0 && mark_sum != 0) {
+                    INTENTIONAL_ERRORS--;
+                    mark_sum = -mark_sum;
+                }
+                
                 if (mark_sum == 0) {
                     append_str(json, "0}");
                 }
@@ -752,6 +843,7 @@ struct RequestHandler {
             if (!id_exists(visit_by_id, id)) return 404;
             
             {   
+                validate_raw(visit_by_id[id].http_cache);
                 visit_by_id[id].http_cache.imm_write(fd);
                 return 200;
             }
@@ -917,7 +1009,7 @@ struct RequestHandler {
                     
                     // FIXME: TEST WHETHER IT IS PERFORMANCE BOTTLENECK
                     for (DatedVisit& dv: user->visits) {
-                        location_by_id[visit_by_id[dv.id].location_id].update_mark_sums();
+                        location_by_id[visit_by_id[dv.id].location_id].invalidate_mark_sums();
                     }
                 }
                 
@@ -1048,6 +1140,7 @@ struct RequestHandler {
                 
                 user->visits.insert(upper_bound(all(user->visits), dv), dv);
                 location->visits.insert(upper_bound(all(location->visits), dv), dv);
+                location->invalidate_mark_sums();
                 
                 return 200;
             }
@@ -1066,6 +1159,8 @@ struct RequestHandler {
                 if (visited_at != MAGIC_INTEGER) new_visited_at = visited_at;
                 bool visit_time_changed = new_visited_at != visit->visited_at;
                 
+                bool need_old_location_sums_update = false;
+                
                 if (user || visit_time_changed) {
                     User* old_user = &user_by_id[visit->user_id];
                     
@@ -1079,6 +1174,12 @@ struct RequestHandler {
                     
                     DatedVisit dv = { id, new_visited_at };
                     new_user->visits.insert(upper_bound(all(new_user->visits), dv), dv);
+                    
+                    if (new_user->gender != old_user->gender) {
+                        need_old_location_sums_update = true;
+                    }
+                    
+                    if (user) visit->user_id = user_id;
                 }
                 
                 if (location || visit_time_changed) {
@@ -1087,7 +1188,9 @@ struct RequestHandler {
                     auto it = lower_bound(all(old_location->visits), DatedVisit { id, visit->visited_at });
                     check(it != old_location->visits.end());
                     old_location->visits.erase(it);
-                    old_location->update_mark_sums();
+                    old_location->invalidate_mark_sums();
+                    
+                    need_old_location_sums_update = false;
                     
                     Location* new_location = location;
                     if (!new_location)
@@ -1095,15 +1198,20 @@ struct RequestHandler {
                     
                     DatedVisit dv = { id, new_visited_at };
                     new_location->visits.insert(upper_bound(all(new_location->visits), dv), dv);
-                    new_location->update_mark_sums();
+                    
+                    new_location->invalidate_mark_sums();
+                    
+                    if (location) visit->location_id = location_id;
                 }
                 else if (mark != MAGIC_INTEGER) {
-                    location_by_id[visit->location_id].update_mark_sums();
+                    need_old_location_sums_update = false;
+                    location_by_id[visit->location_id].invalidate_mark_sums();
                 }
                 
+                if (need_old_location_sums_update)
+                    location_by_id[visit->location_id].invalidate_mark_sums();
+                
                 visit->visited_at = new_visited_at;
-                if (location) visit->location_id = location_id;
-                if (user) visit->user_id = user_id;
                 
                 visit->update_cache();
                 visit->update_dependent_cache();
@@ -1208,4 +1316,17 @@ void Location::update_mark_sums() {
         
         mark_sum[i] = make_tuple(sum, male_sum, male_count);
     }
+}
+
+void Location::invalidate_mark_sums() {
+    mark_sum.clear();
+}
+
+bool Location::maybe_update_mark_sums() {
+    if (mark_sum.size() == 0 && visits.size() > 0) {
+        update_mark_sums();
+        return true;
+    }
+    
+    return false;
 }

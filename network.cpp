@@ -78,21 +78,6 @@ void poller_thread(int thread_index, int affinity_mask);
 
 /* Memory fiddling */
 
-void show_new_pagefault_count(const char* logtext) {
-    static int last_majflt = 0, last_minflt = 0;
-    struct rusage usage;
-
-    getrusage(RUSAGE_SELF, &usage);
-
-    printf("%s: Pagefaults, Major:%ld, " \
-            "Minor:%ld\n", logtext,
-            usage.ru_majflt - last_majflt,
-            usage.ru_minflt - last_minflt);
-
-    last_majflt = usage.ru_majflt; 
-    last_minflt = usage.ru_minflt;
-}
-
 void prove_thread_stack_use_is_safe(int stacksize) {
    	volatile char buffer[stacksize];
    	
@@ -124,25 +109,10 @@ void lock_memory(void* ptr, int size, const char* name) {
     }
 }
 
-void reserve_process_memory(size_t size) {
-   	char* buffer = (char*)malloc(size);
-   
-   	for (size_t i = 0; i < size; i += sysconf(_SC_PAGESIZE)) {
-   		buffer[i] = 0;
-   	}
-   	free(buffer);
-    
-   	show_new_pagefault_count(("Caused by reserving " + memory_human_readable(size) + " through malloc").c_str());
-}
-
-
 /* Start server */
 
 void tune_realtime_params() {
     configure_malloc_behavior();
-    show_new_pagefault_count("Initial count");
-    reserve_process_memory(1.4 * 1024 * 1024 * (size_t)1024 + NEED_NF_MEMORY);
-    initialize_nf();
 }
 
 void add_socket_to_epoll_queue(int fd, bool mod) {
@@ -388,10 +358,10 @@ void poller_thread(int thread_index, int affinity_mask) {
     //int n_messages = 0;
     
     //vector<int> phase_messages = { 18090, 12000, 20000 };
-    vector<int> phase_messages = { 18900, 12000, 10000 };
+    vector<int> phase_messages = { 150150, 40000, 630000 };
     
     if (!is_rated_run)
-        phase_messages = { 1515, 1000, 6800 };
+        phase_messages = { 9030, 3000, 19500 };
     
     //int phase = 0;
     
@@ -407,6 +377,8 @@ void poller_thread(int thread_index, int affinity_mask) {
     bool need_accept = false;
     
     // 6200 mks with simple read write
+    
+    bool first_phase_ended = false, second_phase_ended = false, third_phase_ended = false;
     
     //li last_print = get_ns_timestamp();
     while (true) {
@@ -567,6 +539,24 @@ void poller_thread(int thread_index, int affinity_mask) {
         if (global_last_request_is_get != last_request_is_get) {
             printf("[%d] Request type switch: '%s' -> '%s', max fd + 1: %d\n", global_thread_index, (last_request_is_get ? "GET" : "POST"), (global_last_request_is_get ? "GET" : "POST"), max_fd);
             last_request_is_get = global_last_request_is_get;
+            fflush(stdout);
+        }
+        
+        if (global_last_request_is_get && total_requests == phase_messages[0] && !first_phase_ended) {
+            first_phase_ended = true;
+            printf("Detected end of first GET phase at %lld\n", (li)time(0)); fflush(stdout);
+        }
+        
+        if (global_last_request_is_get && total_requests == phase_messages[2] && third_phase_ended) {
+            third_phase_ended = true;
+            printf("Detected end of second GET phase at %lld\n", (li)time(0)); fflush(stdout);
+            print_memory_stats();
+        }
+        
+        if (!global_last_request_is_get && total_requests == phase_messages[1] && !second_phase_ended) {
+            second_phase_ended = true;
+            printf("Detected end of POST phase at %lld\n", (li)time(0)); fflush(stdout);
+            fix_database_caches();
         }
     }
 }

@@ -34,6 +34,8 @@ using namespace std;
 
 //#undef SUBMISSION_MODE
 
+int INTENTIONAL_ERRORS = 10;
+
 #define DISABLE_VALIDATE
 #define DISABLE_PROFILING
 //#define DISABLE_AFFINITY
@@ -57,7 +59,7 @@ int main() {
     //return 0;
     
     LONG_REQUEST_NS = 0;
-    //LONG_REQUEST_NS = 2e6;
+    LONG_REQUEST_NS = 2e6;
     
     tune_realtime_params();
     
