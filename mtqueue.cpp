@@ -4,7 +4,12 @@ poller_local li global_t_ready_write;
 
 /* Mutli threaded producer-consumer queue */
 
-using pending_write = tuple<int, char*, int>;
+struct pending_write {
+    int fd;
+    char* buffer;
+    int length;
+    //li timestamp;
+};
 
 #ifndef DISABLE_SPINLOCKS
 volatile int queue_first, queue_last;
@@ -13,8 +18,13 @@ volatile int queue_first, queue_last;
 const int CIRCULAR_SIZE = 4096;
 pending_write pending_writes[CIRCULAR_SIZE];
 
+int server_socket_descriptor;
+volatile bool need_accept_connections;
+
+void handle_new_connection(int infd);
+
 void imm_write_call(int fd, const char* buffer, int size) {
-    pending_writes[queue_last] = make_tuple(fd, (char*)buffer, size);
+    pending_writes[queue_last] = pending_write { fd, (char*)buffer, size /*, get_ns_timestamp()*/ };
     int new_value = queue_last >= CIRCULAR_SIZE - 1 ? 0 : queue_last + 1;
     
     if (new_value == queue_first) {
@@ -41,8 +51,9 @@ void consumer_thread(int thread_index, int affinity_mask) {
     set_thread_affinity(affinity_mask, false);
     
     while (true) {
-        if (queue_first == queue_last) continue;
+        //if (queue_first == queue_last && !need_accept_connections) continue;
         
+        if (queue_first != queue_last)
         {
             queue_pop_lock.lock();
             
@@ -56,7 +67,35 @@ void consumer_thread(int thread_index, int affinity_mask) {
             queue_first = new_value;
             queue_pop_lock.unlock();
         
-            write(get<0>(query), get<1>(query), get<2>(query));
+            //li t_took = get_ns_timestamp();
+            write(query.fd, query.buffer, query.length);
+            //li t_written = get_ns_timestamp();
+            //printf("process lag %.3f mks, write lag %.3f\n", (t_took - query.timestamp) / 1e3, (t_written - t_took) / 1e3);
+            continue;
+        }
+        
+        if (thread_index != 0 && need_accept_connections) {
+            //printf("Need accept connections flag spotted!\n");
+            
+            struct sockaddr in_addr;
+            socklen_t in_len = sizeof in_addr;
+            //li t0 = get_ns_timestamp();
+            int infd = accept4(server_socket_descriptor, &in_addr, &in_len, SOCK_NONBLOCK);
+            //printf("ret %d\n", server_socket_descriptor);
+            //profile_delimiter(ACCEPT_TO_ACCEPT);
+            
+            if (infd == -1) {
+                if ((errno == EAGAIN) || (errno == EWOULDBLOCK)) {
+                    continue;
+                }
+                else {
+                    perror("accept");
+                    continue;
+                }
+            }
+
+            handle_new_connection(infd);
+            //printf("Worker thread accepted connection %d\n", infd);
         }
     }
 }

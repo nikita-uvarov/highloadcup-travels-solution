@@ -28,13 +28,15 @@
 
 using namespace rapidjson;
 
+long long process_startup_timestamp;
+
 #define all(v) (v).begin(), (v).end()
 
 using namespace std;
 
 //#undef SUBMISSION_MODE
 
-int INTENTIONAL_ERRORS = 10;
+int INTENTIONAL_ERRORS = 0;
 
 #define DISABLE_VALIDATE
 #define DISABLE_PROFILING
@@ -57,6 +59,7 @@ int INTENTIONAL_ERRORS = 10;
 int main() {
     //printf("string - %d, User - %d, Location - %d, Visit - %d\n", sizeof(string), sizeof(User), sizeof(Location), sizeof(Visit));
     //return 0;
+    process_startup_timestamp = get_ns_timestamp();
     
     LONG_REQUEST_NS = 0;
     LONG_REQUEST_NS = 2e6;

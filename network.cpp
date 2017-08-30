@@ -36,6 +36,8 @@ const int MAX_FDS = 10000;
 const int READ_BUFFER_SIZE = 4096 * 2;
 constexpr bool ACTIVE_WAIT = true;
 
+sockaddr_in local_addr = {};
+
 static int create_and_bind(int port) {
     int sfd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, IPPROTO_IP);
     verify(sfd != -1);
@@ -47,18 +49,18 @@ static int create_and_bind(int port) {
     if (setsockopt(sfd, SOL_SOCKET, SO_REUSEADDR, (const char*)&reuse, sizeof(reuse)) < 0)
         perror("setsockopt(SO_REUSEADDR) failed");
     
-    //
-    
-    sockaddr_in addr = {};
-    bzero((char *) &addr, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = inet_addr("0.0.0.0");
-    addr.sin_port = htons(port);
+    bzero((char *) &local_addr, sizeof(local_addr));
+    local_addr.sin_family = AF_INET;
+    local_addr.sin_addr.s_addr = inet_addr("0.0.0.0");
+    local_addr.sin_port = htons(port);
            
-    verify(bind(sfd, (sockaddr*)&addr, sizeof(addr)) == 0);
+    verify(bind(sfd, (sockaddr*)&local_addr, sizeof(local_addr)) == 0);
     
     if (setsockopt(sfd, SOL_TCP, TCP_QUICKACK, (const char*)&reuse, sizeof(reuse)) < 0)
         perror("setsockopt(TCP_QUICKACK) failed");
+    
+    if (setsockopt(sfd, SOL_TCP, TCP_NODELAY, (const char*)&reuse, sizeof(reuse)) < 0)
+        perror("setsockopt(TCP_NODELAY) failed");
     
     //int ms_poll = 1e9;
     //if (setsockopt(sfd, SOL_SOCKET, SO_BUSY_POLL, (const char*)&ms_poll, sizeof(ms_poll)) < 0)
@@ -131,9 +133,10 @@ void add_socket_to_epoll_queue(int fd, bool mod) {
 
 void start_epoll_server() {
     epoll_server.sfd = create_and_bind(80);
+    server_socket_descriptor = epoll_server.sfd;
     verify(epoll_server.sfd != -1);
 
-    verify(listen(epoll_server.sfd, 4000) != -1);
+    verify(listen(epoll_server.sfd, 20000) != -1);
 
     epoll_server.efd = epoll_create1(0);
     verify(epoll_server.efd != -1);
@@ -231,12 +234,13 @@ thread_local int n_predict = 0, n_total = 0, n_old_total = 0;
 int n_total_first;
 #endif
 
-
 void close_fd_fast(int fd) {
     epoll_ctl(epoll_server.efd, EPOLL_CTL_DEL, fd, 0);
     //if (ec != -1)
     //    perror("epoll_ctl del");
     close(fd);
+    
+    //printf("closed %d\n", fd);
 }
 
 void try_read_from(int fd, bool predict = false) {
@@ -331,6 +335,38 @@ void try_read_from(int fd, bool predict = false) {
 #endif
 }
 
+void handle_new_connection(int infd) {
+    add_socket_to_epoll_queue(infd, false);
+    
+    int one = 1;
+    if (setsockopt(infd, SOL_TCP, TCP_NODELAY, &one, sizeof(one)) != 0) {
+        perror("setsockopt"); fflush(stdout); return;
+    }
+    
+    if (setsockopt(infd, SOL_TCP, TCP_QUICKACK, &one, sizeof(one)) != 0) {
+        perror("setsockopt"); fflush(stdout); return;
+    }
+}
+
+// by unknown reasons first connections are very slow
+// we will do the shittiest thing ever here
+
+void heatup_thread() {
+    int ec = system("./smart_spammer.elf 5 1000");
+    if (ec != 0) {
+        printf("Heatup finished with ec %d!\n", ec); fflush(stdout);
+    }
+    else {
+        printf("Heatup succesful\n"); fflush(stdout);
+    }
+}
+
+void spawn_heatup_detached() {
+    printf("Spawning heatup detached\n"); fflush(stdout);
+    thread t(heatup_thread);
+    t.detach();
+}
+
 void poller_thread(int thread_index, int affinity_mask) {
     global_thread_index = thread_index;
     set_thread_affinity(affinity_mask, true);
@@ -358,10 +394,13 @@ void poller_thread(int thread_index, int affinity_mask) {
     //int n_messages = 0;
     
     //vector<int> phase_messages = { 18090, 12000, 20000 };
+    int prepare_phase_seconds = 60 * 10;
     vector<int> phase_messages = { 150150, 40000, 630000 };
     
-    if (!is_rated_run)
+    if (!is_rated_run) {
         phase_messages = { 9030, 3000, 19500 };
+        prepare_phase_seconds = 60;
+    }
     
     //int phase = 0;
     
@@ -380,8 +419,39 @@ void poller_thread(int thread_index, int affinity_mask) {
     
     bool first_phase_ended = false, second_phase_ended = false, third_phase_ended = false;
     
-    //li last_print = get_ns_timestamp();
+    bool enable_heatup = false;
+    
+    //prepare_phase_seconds = 60;
+    
+    printf("Prepare phase: %d seconds\n", prepare_phase_seconds); fflush(stdout);
+    
+    //enable_heatup = true;
+    
+    if (!is_rated_run) {
+        enable_heatup = true;
+    }
+    
+    int heatup_times = 1;
+    
+    li last_print = get_ns_timestamp();
     while (true) {
+        // 2 heat ups, ~10 s each + 10 s to wait
+        if (!enable_heatup) {
+            double wait_remain = prepare_phase_seconds - (get_ns_timestamp() - process_startup_timestamp) / 1e9;
+            if (wait_remain <= 200 && wait_remain >= 150) {
+                printf("Enabling heat up (%lld), approx %.3f seconds should be available\n", (li)time(0), wait_remain); fflush(stdout);
+                enable_heatup = true;
+            }
+        }
+        
+        if (enable_heatup && heatup_times > 0) {
+            //printf("Spawning idiots to heat-up (%lld)\n", (li)time(0)); fflush(stdout);
+            //spawn_idiots(10, 100);
+            //idiot_times--;
+            heatup_times = 0;
+            spawn_heatup_detached();
+        }
+        
 #if 0
         if (get_ns_timestamp() > last_print + 1e9) {
             printf("max fd + 1: %d\n", max_fd); fflush(stdout);
@@ -494,7 +564,14 @@ void poller_thread(int thread_index, int affinity_mask) {
             }
         }
         
+        need_accept_connections = need_accept;
+        
+        //if (need_accept_connections) { printf("flag is set!\n"); }
+        
+#if 0
         if (need_accept) {
+            vector<li> accept_times;
+            
             while (true) {
                 scope_profile(CONNECTION_ACCEPT);
                         
@@ -503,6 +580,7 @@ void poller_thread(int thread_index, int affinity_mask) {
                 int infd;
 
                 in_len = sizeof in_addr;
+                li t0 = get_ns_timestamp();
                 infd = accept4(epoll_server.sfd, &in_addr, &in_len, SOCK_NONBLOCK);
                 profile_delimiter(ACCEPT_TO_ACCEPT);
                 
@@ -516,14 +594,17 @@ void poller_thread(int thread_index, int affinity_mask) {
                     }
                 }
 
-                add_socket_to_epoll_queue(epoll_server.sfd, true);
-                add_socket_to_epoll_queue(infd, false);
+                handle_new_connection(infd);
+                //add_socket_to_epoll_queue(epoll_server.sfd, true);
                 
-                int one = 1;
-                verify(setsockopt(infd, SOL_TCP, TCP_NODELAY, &one, sizeof(one)) == 0);
-                verify(setsockopt(infd, SOL_TCP, TCP_QUICKACK, &one, sizeof(one)) == 0);
+                accept_times.push_back(get_ns_timestamp() - t0);
+                //printf("accepted in %.3f mks\n", (get_ns_timestamp() - t0) / 1e3);
             }
+            
+            sort(accept_times.rbegin(), accept_times.rend());
+            printf("accept block %d: ", accept_times.size()); for (li x: accept_times) printf("%.3f ", x / 1e3); printf("\n");
         }
+#endif
         
         for (int fd: close_fds) {
             close_fd_fast(fd);
@@ -547,7 +628,7 @@ void poller_thread(int thread_index, int affinity_mask) {
             printf("Detected end of first GET phase at %lld\n", (li)time(0)); fflush(stdout);
         }
         
-        if (global_last_request_is_get && total_requests == phase_messages[2] && third_phase_ended) {
+        if (global_last_request_is_get && total_requests == phase_messages[2] && !third_phase_ended) {
             third_phase_ended = true;
             printf("Detected end of second GET phase at %lld\n", (li)time(0)); fflush(stdout);
             print_memory_stats();
@@ -557,6 +638,7 @@ void poller_thread(int thread_index, int affinity_mask) {
             second_phase_ended = true;
             printf("Detected end of POST phase at %lld\n", (li)time(0)); fflush(stdout);
             fix_database_caches();
+            print_memory_stats();
         }
     }
 }

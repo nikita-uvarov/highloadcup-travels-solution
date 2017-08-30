@@ -1,6 +1,6 @@
 /* custom itoa... dont' know why */
 
-const int MAX_INTEGER_SIZE = 30;
+const int MAX_INTEGER_SIZE = 32;
 poller_local char itoa_buffer[MAX_INTEGER_SIZE];
 poller_local int itoa_length;
 
@@ -50,20 +50,22 @@ struct ResponseBuilder {
         buffer_end = buffer_begin + MAX_RESPONSE_SIZE;
     }
     
+#if 0
     void discard_old() {
         if (!(buffer_begin >= response_buffer[0] && buffer_begin < response_buffer[N_RESPONSE_BUFFERS - 1] + sizeof(response_buffer[0])))
             delete[] buffer_begin;
     }
+#endif
     
     void realloc_if_needed(int length) {
         while (buffer_pos + length >= buffer_end) {
             n_allocs++;
             int double_length = (buffer_end - buffer_begin) * 2;
             
-            char* new_buffer = new char[double_length];
+            char* new_buffer = nf_allocate_mem(double_length);
             memcpy(new_buffer, buffer_begin, buffer_end - buffer_begin);
             buffer_pos = new_buffer + (buffer_pos - buffer_begin);
-            discard_old();
+            //discard_old();
             
             buffer_begin = new_buffer;
             buffer_end = buffer_begin + double_length;

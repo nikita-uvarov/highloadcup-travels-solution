@@ -120,6 +120,7 @@ void reindex_database();
 
 timestamp current_timestamp;
 bool is_rated_run;
+bool is_local_run;
 
 void load_options_from_file(string file_name, bool must_exist) {
     ifstream is(file_name);
@@ -135,7 +136,15 @@ void load_options_from_file(string file_name, bool must_exist) {
     verify(is >> current_timestamp >> is_rated_int);
     verify(is_rated_int == 0 || is_rated_int == 1);
     is_rated_run = (is_rated_int == 1);
-    printf("Options loaded from '%s': timestamp %d, is rated: %s\n", file_name.c_str(), current_timestamp, is_rated_run ? "true" : "false"); fflush(stdout);
+    
+    int is_local_int = 0;
+    if (is >> is_local_int)
+        is_local_run = (is_local_int == 1);
+    else
+        is_local_run = false;
+    
+    printf("Options loaded from '%s': timestamp %d, is rated: %s, is local: %s\n", file_name.c_str(), current_timestamp,
+           is_rated_run ? "true" : "false", is_local_run ? "true" : "false"); fflush(stdout);
 }
 
 string memory_human_readable(unsigned int bytes) {
