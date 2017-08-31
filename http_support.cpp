@@ -5,7 +5,7 @@ void write_only_header_answer(int fd, int code) {
     //printf("response %d\n\n", code);
     
     scope_profile(WRITE_RESPONSE);
-    global_t_ready_write = get_ns_timestamp();
+    //global_t_ready_write = get_ns_timestamp();
     
     //int res = 0, expected = 0;
     if (code == 200) {
@@ -84,8 +84,8 @@ struct http_input_request_handler {
         if (pret < 0) {
             profile_end(PARSE_HEADERS);
             if (pret == -1) {
-                printf("Request failed to parse headers:\n'%.*s'\n", request_length, request_content);
-                fflush(stdout);
+                //printf("Request failed to parse headers:\n'%.*s'\n", request_length, request_content);
+                //fflush(stdout);
             }
             
             return pret;
@@ -124,7 +124,7 @@ struct http_input_request_handler {
             
             int have_length = request_length - pret;
             if (have_length < content_length) {
-                printf("warning -- large request (%d have, %d need)\n", have_length, content_length); fflush(stdout);
+                //printf("warning -- large request (%d have, %d need)\n", have_length, content_length); fflush(stdout);
                 return -2;
             }
             
@@ -202,10 +202,10 @@ int process_request_options(RequestHandler& handler, const char* path, const cha
 int process_get_request_raw(int fd, const char* path, int path_length);
 int process_post_request_raw(int fd, const char* path, int path_length, const char* body);
 
-poller_local li global_t_ready;
+//poller_local li global_t_ready;
 poller_local bool global_last_request_is_get = false;
 poller_local int total_requests = 0;
-poller_local li global_t_polled;
+//poller_local li global_t_polled;
 
 #if 0
 li LONG_REQUEST_NS = 250 * (li)1000; // 500 mks is long
@@ -224,6 +224,7 @@ void request_completed(bool is_get, const char* path, int path_length, int code)
     global_last_request_is_get = is_get;
     total_requests++;
     
+#if 0
     li t_answered = get_ns_timestamp();
     total_reads += global_t_ready - global_t_polled;
     total_logic += global_t_ready_write - global_t_ready;
@@ -248,6 +249,7 @@ void request_completed(bool is_get, const char* path, int path_length, int code)
         }
     }
     max_request_ns = max(max_request_ns, t_answered - global_t_ready);
+#endif
 }
 
 int process_get_request(int fd, const char* path, int path_length) {

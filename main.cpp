@@ -34,10 +34,6 @@ long long process_startup_timestamp;
 
 using namespace std;
 
-//#undef SUBMISSION_MODE
-
-int INTENTIONAL_ERRORS = 0;
-
 #define DISABLE_VALIDATE
 #define DISABLE_PROFILING
 //#define DISABLE_AFFINITY
@@ -57,8 +53,6 @@ int INTENTIONAL_ERRORS = 0;
 #include "network.cpp"
 
 int main() {
-    //printf("string - %d, User - %d, Location - %d, Visit - %d\n", sizeof(string), sizeof(User), sizeof(Location), sizeof(Visit));
-    //return 0;
     process_startup_timestamp = get_ns_timestamp();
     
     LONG_REQUEST_NS = 0;

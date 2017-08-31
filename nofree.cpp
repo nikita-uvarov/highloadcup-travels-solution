@@ -1,15 +1,11 @@
 // No free allocator. Cache everything, answer and die.
 
-
-// GB
-const unsigned NEED_NF_MEMORY = 2.5 * 1000 * 1000 * 1000;
+const unsigned NEED_NF_MEMORY = 2.252 * 1000 * 1000 * 1000;
 char* nf_memory;
 unsigned nf_pos;
 
-int last_tens;
-
 void print_nofree_stats() {
-    printf("nofree: %s / %s\n", memory_human_readable(nf_pos).c_str(), memory_human_readable(NEED_NF_MEMORY).c_str()); fflush(stdout);
+    printf("nofree: %s / %s\n", memory_human_readable(nf_pos).c_str(), memory_human_readable(NEED_NF_MEMORY).c_str());
 }
 
 struct fast_string {
@@ -17,18 +13,8 @@ struct fast_string {
     
     void imm_write(int fd) {
         imm_write_call(fd, nf_memory + offset, length);
-        global_t_ready_write = get_ns_timestamp();
     }
 };
-
-void check_allocations() {
-    if (nf_pos * (li)10 / NEED_NF_MEMORY != last_tens) {
-        last_tens = nf_pos * 10 / NEED_NF_MEMORY;
-        printf("%.2f%% non-reusable memory is used\n", nf_pos / (double)NEED_NF_MEMORY * 100); fflush(stdout);
-    }
-    
-    verify(nf_pos < NEED_NF_MEMORY);
-}
 
 void initialize_nf() {
     nf_memory = (char*)malloc(NEED_NF_MEMORY);
@@ -38,7 +24,6 @@ void initialize_nf() {
 char* nf_allocate_mem(unsigned size) {
     char* mem = nf_memory + nf_pos;
     nf_pos += size;
-    check_allocations();
     return mem;
 }
 

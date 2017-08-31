@@ -303,7 +303,7 @@ void try_read_from(int fd, bool predict = false) {
     handler.request_content = read_buf;
     handler.request_length = count;
     
-    global_t_ready = get_ns_timestamp();
+    //global_t_ready = get_ns_timestamp();
     
     int pret = handler.parse(fd);
     if (pret <= 0)
@@ -543,7 +543,7 @@ void poller_thread(int thread_index, int affinity_mask) {
             bool error = (events[i].events & EPOLLERR) || (events[i].events & EPOLLHUP) || (events[i].events & EPOLLRDHUP) || (!(events[i].events & EPOLLIN));
             
             if (!error && events[i].data.fd != epoll_server.sfd) {
-                global_t_polled = get_ns_timestamp();
+                //global_t_polled = get_ns_timestamp();
                 
                 max_fd = max(max_fd, events[i].data.fd + 1);
                 try_read_from(events[i].data.fd);
@@ -609,19 +609,14 @@ void poller_thread(int thread_index, int affinity_mask) {
         for (int fd: close_fds) {
             close_fd_fast(fd);
         }
-            
-        if (false) {
-            printf("polled %d, %.3f mks read, %.3f mks logic, %.3f mks write, %d allocs\n", n, total_reads / 1e3, total_logic / 1e3, total_writes / 1e3, n_allocs);
-            total_reads = total_logic = total_writes = 0;
-            n_allocs = 0;
-            fflush(stdout);
-        }
         
+#if 0
         if (global_last_request_is_get != last_request_is_get) {
             printf("[%d] Request type switch: '%s' -> '%s', max fd + 1: %d\n", global_thread_index, (last_request_is_get ? "GET" : "POST"), (global_last_request_is_get ? "GET" : "POST"), max_fd);
             last_request_is_get = global_last_request_is_get;
             fflush(stdout);
         }
+#endif
         
         if (global_last_request_is_get && total_requests == phase_messages[0] && !first_phase_ended) {
             first_phase_ended = true;

@@ -178,12 +178,6 @@ void load_initial_data() {
     current_timestamp = time(0);
     li t_begin = get_ns_timestamp();
     
-#if 0
-    
-    load_json_dump_from_file("../data/data/locations_1.json");
-    load_json_dump_from_file("../data/data/users_1.json");
-    load_json_dump_from_file("../data/data/visits_1.json");
-#else
     printf("Running in submission mode, proceeding to unzip\n"); fflush(stdout);
     {
         load_options_from_file("/tmp/data/options.txt", false);
@@ -226,13 +220,49 @@ void load_initial_data() {
         
         verify(n_files > 0);
     }
-#endif
     
     reindex_database();
     li t_end = get_ns_timestamp();
     printf("Initial data loaded in %.3f seconds\n", (t_end - t_begin) / (double)1e9); fflush(stdout);
     
     print_memory_stats();
+}
+
+char slow_avg_buffer[16];
+
+void slow_get_avg(int n_marks, int mark_sum) {
+    sprintf(slow_avg_buffer, "%.5f}", mark_sum / (double)n_marks + 1e-12);
+}
+
+char fast_avg_buffer[16] = "0.00000}";
+constexpr int fast_avg_expression_length = 8;
+
+// 0.02 s. win & maybe crash? ok I optimize
+
+void fast_get_avg(int n_marks, int mark_sum) {
+    int base = (mark_sum * (li)1000000 / n_marks);
+    int add = base % 10 >= 5; base /= 10;
+    
+    for (int t = 0; t < 6; t++) {
+        fast_avg_buffer[t == 5 ? 0 : 6 - t] = '0' + base % 10;
+        base /= 10;
+    }
+    
+    int pos = 6;
+    while (add) {
+        add += fast_avg_buffer[pos] - '0';
+        fast_avg_buffer[pos] = '0' + add % 10;
+        add /= 10;
+        pos--;
+        if (pos == 1) pos = 0;
+    }
+}
+
+double get_double_rep(string s) {
+    istringstream is(s);
+    double x;
+    is >> x;
+    return x;
 }
 
 void inspect_server_parameters() {
@@ -260,13 +290,45 @@ void inspect_server_parameters() {
         
         li hash = 0;
         for (int i = 0; i < N_TEST_SPRINTFS; i++) {
-            char buf[100];
-            sprintf(buf, "%.5f", rand() / (double)RAND_MAX);
-            hash += buf[2] - '0';
+            int nm = rand() % 1000 + 1, sum = rand() % (5 * nm);
+            slow_get_avg(nm, sum);
+            hash += slow_avg_buffer[2] - '0';
         }
             
         li t_end = get_ns_timestamp();
-        printf("sprintf(double) cost (ns): %.5f, hash %lld\n", (t_end - t_begin) / (double)N_TEST_SPRINTFS, hash); fflush(stdout);
+        printf("get_avg(slow) cost (ns): %.5f, hash %lld\n", (t_end - t_begin) / (double)N_TEST_SPRINTFS, hash); fflush(stdout);
+        
+        t_begin = get_ns_timestamp();
+        
+        hash = 0;
+        for (int i = 0; i < N_TEST_SPRINTFS; i++) {
+            int nm = rand() % 1000 + 1, sum = rand() % (5 * nm);
+            fast_get_avg(nm, sum);
+            hash += fast_avg_buffer[2] - '0';
+        }
+            
+        t_end = get_ns_timestamp();
+        printf("get_avg(fast) cost (ns): %.5f, hash %lld\n", (t_end - t_begin) / (double)N_TEST_SPRINTFS, hash); fflush(stdout);
+        
+#if 0
+        int n_errors = 0;
+        for (int n = 1; n < 10000; n++) {
+            for (int s = 0; s <= 5 * n; s++) {
+                slow_get_avg(n, s);
+                string slow_res = slow_avg_buffer;
+                fast_get_avg(n, s);
+                string fast_res = fast_avg_buffer;
+                
+                //if (abs(get_double_rep(slow_res) - get_double_rep(fast_res)) > 1e-13) {
+                if (fast_res != slow_res) {
+                    printf("%d / %d: answer: '%s', expected: '%s'\n", s, n, fast_res.c_str(), slow_res.c_str());
+                    n_errors++;
+                    if (n_errors > 100) exit(1);
+                }
+            }
+            if (n % 1000 == 0) printf("%d\n", n);
+        }
+#endif
     }
 }
 

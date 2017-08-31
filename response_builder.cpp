@@ -34,7 +34,6 @@ const int N_RESPONSE_BUFFERS = 2048;
 const int MAX_RESPONSE_SIZE = 4096 * 2;
 poller_local char response_buffer[N_RESPONSE_BUFFERS][MAX_RESPONSE_SIZE];
 
-poller_local int n_allocs = 0;
 poller_local int fd_index;
 
 struct ResponseBuilder {
@@ -44,7 +43,7 @@ struct ResponseBuilder {
     
     ResponseBuilder() {
         fd_index++;
-        fd_index %= N_RESPONSE_BUFFERS;
+        if (fd_index >= N_RESPONSE_BUFFERS) fd_index = 0;
         
         buffer_begin = buffer_pos = response_buffer[fd_index];
         buffer_end = buffer_begin + MAX_RESPONSE_SIZE;
@@ -59,7 +58,6 @@ struct ResponseBuilder {
     
     void realloc_if_needed(int length) {
         while (buffer_pos + length >= buffer_end) {
-            n_allocs++;
             int double_length = (buffer_end - buffer_begin) * 2;
             
             char* new_buffer = nf_allocate_mem(double_length);
@@ -97,7 +95,7 @@ struct ResponseBuilder {
         
         profile_begin(WRITE_RESPONSE);
         //li t0 = get_ns_timestamp();
-        global_t_ready_write = get_ns_timestamp();
+        //global_t_ready_write = get_ns_timestamp();
         imm_write_call(fd, buffer_begin, buffer_pos - buffer_begin);
         //pending_writes.emplace_back(fd, buffer_begin, buffer_pos - buffer_begin);
         //::write(fd, buffer_begin, buffer_pos - buffer_begin);

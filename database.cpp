@@ -69,8 +69,6 @@ struct Location {
     void update_mark_sums();
 };
 
-// aim at 169 s.
-
 struct Visit {
     int id = -1;
     int location_id;
@@ -88,7 +86,6 @@ struct Visit {
 vector<User> user_by_id;
 vector<Location> location_by_id;
 vector<Visit> visit_by_id;
-//unordered_set<string> all_user_emails;
 
 #ifndef DISABLE_DATABASE_WRITE_LOCKS
 std::mutex write_mutex;
@@ -136,26 +133,11 @@ void initialize_age_cache() {
         
         time_struct.tm_year -= age;
         time_struct.tm_year = max(time_struct.tm_year, 2);
-        //printf("need %d\n", time_struct.tm_year);
         age_filter_cache[age] = mktime(&time_struct);
         
         time_struct.tm_year = orig_year;
     }
 }
-
-#if 0
-set<string> all_strings;
-
-int get_compression_profit(string& s) {
-    if (all_strings.count(s)) {
-        return s.length();
-    }
-    else {
-        all_strings.insert(s);
-        return 0;
-    }
-}
-#endif
 
 void show_new_pagefault_count(const char* logtext) {
     static int last_majflt = 0, last_minflt = 0;
@@ -204,18 +186,11 @@ void lock_all_memory() {
 
 void reindex_database() {
     li reindex_start = get_ns_timestamp();
-    //int profit_email = 0, profit_first_name = 0, profit_last_name = 0, profit_place = 0, profit_country = 0, profit_country_unesc = 0, profit_city = 0;
     
     int n_users = 0;
     for (int id = 0; id < (int)user_by_id.size(); id++)
         if (user_by_id[id].id == id) {
             user_by_id[id].visits.clear();
-            
-#if 0
-            profit_email += get_compression_profit(user_by_id[id].email);
-            profit_first_name += get_compression_profit(user_by_id[id].first_name);
-            profit_last_name += get_compression_profit(user_by_id[id].last_name);
-#endif
             
             n_users++;
         }
@@ -225,26 +200,7 @@ void reindex_database() {
         if (location_by_id[id].id == id) {
             location_by_id[id].visits.clear();
             n_locations++;
-            
-#if 0
-            profit_place += get_compression_profit(location_by_id[id].place);
-            profit_country += get_compression_profit(location_by_id[id].country);
-            profit_country_unesc += get_compression_profit(location_by_id[id].country_unescaped);
-            profit_city += get_compression_profit(location_by_id[id].city);
-#endif
         }
-        
-#if 0
-    // 78 Mb total
-    printf("String compression profit: email - %s, first name - %s, last name - %s, place - %s, country - %s, country unesc - %s, city - %s\n",
-           memory_human_readable(profit_email).c_str(),
-           memory_human_readable(profit_first_name).c_str(),
-           memory_human_readable(profit_last_name).c_str(),
-           memory_human_readable(profit_place).c_str(),
-           memory_human_readable(profit_country).c_str(),
-           memory_human_readable(profit_country_unesc).c_str(),
-           memory_human_readable(profit_city).c_str());
-#endif
     
     int n_visits = 0;
     for (int id = 0; id < (int)visit_by_id.size(); id++) {
@@ -267,7 +223,7 @@ void reindex_database() {
     for (int id = 0; id < (int)location_by_id.size(); id++)
         if (location_by_id[id].id == id)
             sort(all(location_by_id[id].visits));
-
+        
     const int RESERVE = 12000;
     visit_by_id.reserve(visit_by_id.size() + RESERVE);
     location_by_id.reserve(location_by_id.size() + RESERVE);
@@ -277,7 +233,6 @@ void reindex_database() {
     reindex_start = get_ns_timestamp();
     
     printf("Beginning to setup NF memory\n"); fflush(stdout);
-    
     setup_nf();
     
     for (int id = 0; id < (int)user_by_id.size(); id++) {
@@ -342,17 +297,6 @@ void load_json_dump(char* mutable_buffer) {
     const Value& root = document[entity_to_string(e)];
     verify(root.IsArray());
     
-    //printf("loading '%s', %d entries\n", entity_to_string(e), root.Size());
-    
-    // FIXME: add hints knowing real data size and/or estimations by file size
-    if (e == Entity::USERS) {
-        user_by_id.reserve(user_by_id.size() + root.Size());
-        //all_user_emails.max_load_factor(0.25);
-        //all_user_emails.reserve(all_user_emails.size() + root.Size());
-    }
-    if (e == Entity::LOCATIONS) location_by_id.reserve(location_by_id.size() + root.Size());
-    if (e == Entity::VISITS) visit_by_id.reserve(visit_by_id.size() + root.Size());
-    
     for (SizeType i = 0; i < root.Size(); i++) {
         const auto& o = root[i].GetObject();
         int id = o["id"].GetInt();
@@ -367,8 +311,6 @@ void load_json_dump(char* mutable_buffer) {
             new_user.last_name = json_escape_string(o["last_name"].GetString());
             new_user.gender = o["gender"].GetString()[0];
             new_user.birth_date = o["birth_date"].GetInt();
-            //new_user.update_cache();
-            //all_user_emails.emplace(new_user.email);
             
             verify(new_user.gender == 'm' || new_user.gender == 'f');
         }
@@ -382,7 +324,6 @@ void load_json_dump(char* mutable_buffer) {
             new_location.country = json_escape_string(new_location.country_unescaped);
             new_location.city = json_escape_string(o["city"].GetString());
             new_location.distance = o["distance"].GetInt();
-            //new_location.update_cache();
             
             verify(new_location.distance >= 0);
         }
@@ -395,7 +336,6 @@ void load_json_dump(char* mutable_buffer) {
             new_visit.user_id = o["user"].GetInt();
             new_visit.visited_at = o["visited_at"].GetInt();
             new_visit.mark = o["mark"].GetInt();
-            //new_visit.update_cache();
             
             verify(new_visit.mark >= 0 && new_visit.mark <= 5);
         }
@@ -416,8 +356,6 @@ void load_json_dump_from_file(string file_name) {
     load_json_dump(buffer);
     
     delete[] buffer;
-    
-    //printf("Data loaded from file '%s'\n", file_name.c_str());
 }
 
 Entity get_entity(const char*& path, int path_length) {
@@ -454,15 +392,6 @@ Entity get_entity(const char*& path, int path_length) {
 #define header_content_length_zero "Content-Length: 0\r\n"
 #define header_two_headers "X: 1\r\nY: 1\r\n"
 #define header_rn "\r\n"
-
-//#define header_connection_close "Connection: keep-alive\r\n"
-//#define header_connection_close ""
-//#define header_server "Server: 1\r\n"
-//#define header_host "Host: travels.com\r\n"
-//#define header_host
-    
-// if doesn't work, easy to fix
-//#define header_connection_close_real "Connection: keep-alive\r\n"
 
 struct RequestHandler {
     bool is_get;
@@ -629,6 +558,7 @@ struct RequestHandler {
                     // decode percent-encoded in-place
                     country_ptr_end = percent_decode(country_ptr_begin, country_ptr_end);
                     //printf("decoded country as '%.*s'\n", (int)(country_ptr_end - country_ptr_begin), country_ptr_begin);
+                    
                     if (!country_ptr_end)
                         return 400;
                 }
@@ -649,25 +579,8 @@ struct RequestHandler {
                             continue;
                     }
                     
-#if 1
                     json.append(nf_memory + visit.json_cache.offset, visit.json_cache.length);
                     n_visits++;
-#else
-                    if (n_visits) {
-                        append_str(json, ",{\"mark\":");
-                    }
-                    else {
-                        append_str(json, "{\"mark\":");
-                    }
-                    n_visits++;
-                    
-                    json.append_int(visit.mark);
-                    append_str(json, ",\"visited_at\":");
-                    json.append_int(visit.visited_at);
-                    append_str(json, ",\"place\":");
-                    json.append(location.place.data(), location.place.length());
-                    append_str(json, "}");
-#endif
                 }
                 
                 // remove last comma
@@ -676,8 +589,6 @@ struct RequestHandler {
                 
                 append_str(json, "]}");
                 
-                //li endb = get_ns_timestamp() - global_t_ready;
-                //printf("timings %.3f %.3f\n", startb / 1000.0, endb / 1000.0);
                 send_response();
                 return 200;
             }
@@ -740,15 +651,6 @@ struct RequestHandler {
                     from_age = min(from_age, MAX_ALLOWED_AGE);
                     
                     to_filter = min((time_t)to_filter, age_filter_cache[from_age] - 1);
-                    
-#if 0
-                    int orig_year = time_struct.tm_year;
-                    time_struct.tm_year -= from_age;
-                    time_struct.tm_year = max(time_struct.tm_year, 2);
-                    //printf("need %d\n", time_struct.tm_year);
-                    to_filter = min((time_t)to_filter, mktime(&time_struct) - 1);
-                    time_struct.tm_year = orig_year;
-#endif
                 }
                 
                 if (to_age != MAGIC_INTEGER) {
@@ -756,23 +658,7 @@ struct RequestHandler {
                     to_age = min(to_age, MAX_ALLOWED_AGE);
                     
                     from_filter = max((time_t)from_filter, age_filter_cache[to_age] + 1);
-#if 0
-                    time_struct.tm_year -= to_age;
-                    time_struct.tm_year = max(time_struct.tm_year, 2);
-                    from_filter = max((time_t)from_filter, mktime(&time_struct) + 1);
-#endif
                 }
-                
-#if 0
-                time_t now_li = now, from_li = from_filter, to_li = to_filter;
-                printf("filters %d %d\n", from_filter, to_filter);
-                gmtime_r(&now_li, &time_struct);
-                printf("now year %d\n", time_struct.tm_year);
-                gmtime_r(&from_li, &time_struct);
-                printf("from year %d\n", time_struct.tm_year);
-                gmtime_r(&to_li, &time_struct);
-                printf("to year %d\n", time_struct.tm_year);
-#endif
                 
                 int n_marks = 0, mark_sum = 0;
                 
@@ -821,18 +707,12 @@ struct RequestHandler {
                     }
                 }
                 
-                if (INTENTIONAL_ERRORS > 0 && mark_sum != 0) {
-                    INTENTIONAL_ERRORS--;
-                    mark_sum = -mark_sum;
-                }
-                
                 if (mark_sum == 0) {
                     append_str(json, "0}");
                 }
                 else {
-                    char mark_avg[16];
-                    sprintf(mark_avg, "%.5f}", mark_sum / (double)n_marks + 1e-12);
-                    json.append(mark_avg, strlen(mark_avg));
+                    fast_get_avg(n_marks, mark_sum);
+                    json.append(fast_avg_buffer, fast_avg_expression_length);
                 }
                 
                 send_response();
@@ -867,7 +747,7 @@ struct RequestHandler {
             return 200;
         }
         
-        printf("VERY STRANGE -- failed to answer GET\n"); fflush(stdout);
+        //printf("VERY STRANGE -- failed to answer GET\n"); fflush(stdout);
         return 400;
     }
     
@@ -878,7 +758,6 @@ struct RequestHandler {
         
 #define successful_update() \
         profile_begin(WRITE_RESPONSE); \
-        global_t_ready_write = get_ns_timestamp(); \
         imm_write_call(fd, HTTP_OK_WITH_EMPTY_JSON_RESPONSE, sizeof(HTTP_OK_WITH_EMPTY_JSON_RESPONSE) - 1); \
         profile_end(WRITE_RESPONSE)
         //close(fd);
@@ -987,18 +866,11 @@ struct RequestHandler {
                 return 200;
             }
             else {
-                if (email) {
-                    //if (all_user_emails.find(email) != all_user_emails.end() && user->email != email)
-                    //    return 400;
-                }
-                
                 successful_update();
                 lock_write_access();
                 
                 if (email) {
-                    //all_user_emails.erase(user->email);
                     user->email = email;
-                    //all_user_emails.emplace(user->email);
                 }
                 
                 if (first_name) user->first_name = json_escape_string(first_name);
@@ -1007,7 +879,6 @@ struct RequestHandler {
                 if (gender && user->gender != *gender) {
                     user->gender = *gender;
                     
-                    // FIXME: TEST WHETHER IT IS PERFORMANCE BOTTLENECK
                     for (DatedVisit& dv: user->visits) {
                         location_by_id[visit_by_id[dv.id].location_id].invalidate_mark_sums();
                     }
@@ -1220,7 +1091,7 @@ struct RequestHandler {
             }
         }
         
-        printf("VERY STRANGE -- failed to answer POST\n"); fflush(stdout);
+        //printf("VERY STRANGE -- failed to answer POST\n"); fflush(stdout);
         return 400;
     }
     
