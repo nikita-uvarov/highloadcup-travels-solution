@@ -4,11 +4,11 @@
 
 Это решение для конкурса Highloadcup (https://highloadcup.ru/, https://github.com/sat2707/hlcupdocs), представляющее собой сервер, реализующий REST API для набора из трёх сущностей (entity, user, location). Список методов API (полное описание - по ссылке):
 
-1. GET /<entity>/<id>
-2. GET /users/<id>/visits
-3. GET /locations/<id>/avg
-4. POST /<entity>/<id>
-5. POST /<entity>/new
+1. GET /entity/**id**
+2. GET /users/**id**/visits
+3. GET /locations/**id**/avg
+4. POST /entity/**id**
+5. POST /entity/new
 
 Цель конкурса - в весьма специфичных условиях максимизировать RPS (requests per second) сервера при ответе на запросы.
 
